@@ -232,3 +232,40 @@ func (f *flaky) InsertCostRecords(ctx context.Context, recs []CostRecord) error 
 	}
 	return f.Memory.InsertCostRecords(ctx, recs)
 }
+
+// The single-node memory store keeps bounded history so a long-running instance does
+// not grow without limit (the soak test found this); the newest records stay queryable.
+// Covers: NFR-05
+func TestNFR05_MemoryStoreIsBounded(t *testing.T) {
+	m := NewMemory()
+	m.MaxCostRecords, m.MaxDecisions = 1000, 500
+	ctx := context.Background()
+	recs := sampleRecords(5000)
+	for i := 0; i < len(recs); i += 100 {
+		if err := m.InsertCostRecords(ctx, recs[i:i+100]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3000; i++ {
+		_ = m.PutDecision(ctx, DecisionRecord{RequestID: fmt.Sprintf("d%d", i)})
+	}
+	if len(m.costs) > 1000 || len(m.decisions) > 500 || len(m.decisionOrder) != len(m.decisions) {
+		t.Fatalf("kept %d costs, %d decisions (%d ordered)", len(m.costs), len(m.decisions), len(m.decisionOrder))
+	}
+	last := recs[len(recs)-1]
+	if i, ok := m.costIndex[last.RequestID]; !ok || m.costs[i].RequestID != last.RequestID {
+		t.Fatal("newest cost record lost or index stale")
+	}
+	// Upserts still hit the right row after trimming.
+	last.CostUSD = 42
+	_ = m.InsertCostRecords(ctx, []CostRecord{last})
+	if m.costs[m.costIndex[last.RequestID]].CostUSD != 42 {
+		t.Fatal("upsert after trim updated the wrong row")
+	}
+	if _, err := m.GetDecision(ctx, "d2999"); err != nil {
+		t.Fatal("newest decision lost")
+	}
+	if _, err := m.GetDecision(ctx, "d0"); err == nil {
+		t.Fatal("oldest decision kept beyond the bound")
+	}
+}

@@ -55,7 +55,17 @@ type depState struct {
 	cold      bool
 	lastErr   string
 	changedAt time.Time
+	// Window aggregates kept incrementally: fails is exact; p95 is recomputed lazily and
+	// at most every p95Every under load, since sorting the window per request dominated
+	// the request path's CPU.
+	fails    int
+	p95      float64
+	p95Dirty bool
+	p95At    time.Time
+	scratch  []float64
 }
+
+const p95Every = 200 * time.Millisecond
 
 // Tracker holds health and breaker state for every deployment.
 type Tracker struct {
@@ -183,10 +193,12 @@ func (t *Tracker) Record(dep string, ok bool, latencyMs float64, errMsg string) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.window = append(s.window, outcome{at: now, ok: ok, latency: latencyMs})
+	s.p95Dirty = true
 	t.trim(s, cfg, now)
 	if ok {
 		s.consec = 0
 	} else {
+		s.fails++
 		s.lastErr = errMsg
 		s.consec++
 	}
@@ -194,7 +206,7 @@ func (t *Tracker) Record(dep string, ok bool, latencyMs float64, errMsg string) 
 	case HalfOpen:
 		s.probing = false
 		if ok {
-			s.window, s.consec = s.window[:0], 0
+			s.window, s.consec, s.fails, s.p95, s.p95Dirty = s.window[:0], 0, 0, 0, false
 			t.transition(dep, s, Closed, "probe succeeded")
 		} else {
 			s.openedAt = now
@@ -226,41 +238,55 @@ func (t *Tracker) trim(s *depState, cfg BreakerConfig, now time.Time) {
 	for cut < len(s.window) && now.Sub(s.window[cut].at) > cfg.Window {
 		cut++
 	}
-	if cut > 0 {
-		s.window = append(s.window[:0], s.window[cut:]...)
+	if over := len(s.window) - cut - 10000; over > 0 {
+		cut += over
 	}
-	if len(s.window) > 10000 {
-		s.window = s.window[len(s.window)-10000:]
-	}
-}
-
-func (t *Tracker) stats(s *depState) (n int, errRate, p95 float64) {
-	n = len(s.window)
-	if n == 0 {
+	if cut == 0 {
 		return
 	}
-	fails := 0
-	lats := make([]float64, 0, n)
-	for _, o := range s.window {
+	for _, o := range s.window[:cut] {
 		if !o.ok {
-			fails++
-		} else {
-			lats = append(lats, o.latency)
+			s.fails--
 		}
 	}
-	errRate = float64(fails) / float64(n)
-	if len(lats) > 0 {
-		sort.Float64s(lats)
-		p95 = lats[min(len(lats)-1, len(lats)*95/100)]
+	// Reslicing (not copying) keeps trim O(cut); append reallocates once the tail is full.
+	s.window = s.window[cut:]
+	s.p95Dirty = true
+}
+
+// stats returns the window's size, error rate and (when needP95) p95 latency of
+// successful requests.
+func (t *Tracker) stats(s *depState, needP95 bool) (n int, errRate, p95 float64) {
+	n = len(s.window)
+	if n == 0 {
+		return 0, 0, 0
 	}
-	return
+	errRate = float64(s.fails) / float64(n)
+	if !needP95 {
+		return n, errRate, s.p95
+	}
+	if s.p95Dirty && (n <= 256 || t.Now().Sub(s.p95At) >= p95Every) {
+		lats := s.scratch[:0]
+		for _, o := range s.window {
+			if o.ok {
+				lats = append(lats, o.latency)
+			}
+		}
+		s.p95 = 0
+		if len(lats) > 0 {
+			sort.Float64s(lats)
+			s.p95 = lats[min(len(lats)-1, len(lats)*95/100)]
+		}
+		s.scratch, s.p95Dirty, s.p95At = lats, false, t.Now()
+	}
+	return n, errRate, s.p95
 }
 
 func (t *Tracker) shouldOpen(s *depState, cfg BreakerConfig) string {
 	if cfg.Consecutive > 0 && s.consec >= cfg.Consecutive {
 		return "consecutive failures"
 	}
-	n, er, p95 := t.stats(s)
+	n, er, p95 := t.stats(s, cfg.LatencyP95Ms > 0)
 	if n < cfg.MinRequests {
 		return ""
 	}
@@ -280,7 +306,7 @@ func (t *Tracker) healthLocked(s *depState, cfg BreakerConfig) Health {
 	if s.probeFail {
 		return Unhealthy
 	}
-	n, er, p95 := t.stats(s)
+	n, er, p95 := t.stats(s, cfg.LatencyP95Ms > 0)
 	if n >= cfg.MinRequests && (er >= cfg.ErrorRate/2 || cfg.LatencyP95Ms > 0 && p95 > cfg.LatencyP95Ms*0.8) {
 		return Degraded
 	}
@@ -342,7 +368,7 @@ func (t *Tracker) Status(dep string) Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t.trim(s, cfg, t.Now())
-	n, er, p95 := t.stats(s)
+	n, er, p95 := t.stats(s, true)
 	return Status{Deployment: dep, Health: t.healthLocked(s, cfg), Breaker: s.state, Reason: s.reason, Requests: n,
 		ErrorRate: er, P95Ms: p95, LastError: s.lastErr, Cold: s.cold, Since: s.changedAt}
 }

@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,9 +43,10 @@ type App struct {
 	Store  store.Store
 	redis  redis.UniversalClient
 
-	mu       sync.Mutex
-	fileStat map[string]time.Time
-	fileCfg  *config.Config
+	mu              sync.Mutex
+	fileStat        map[string]time.Time
+	fileCfg         *config.Config
+	shutdownTracing func(context.Context) error
 }
 
 func LoadConfig(path string) (*config.Config, error) { return config.Load(path) }
@@ -133,8 +135,23 @@ func New(ctx context.Context, o Options) (*App, error) {
 	}
 	a.Server = server.New(a.Engine, o.Log)
 	a.Server.Ready = a.ready
+	metrics := observe.NewMetrics()
+	a.Engine.WireMetrics(metrics)
+	a.Engine.Events = append(sinks, metrics)
+	a.Server.Metrics = metrics
+	headers := map[string]string{}
+	for k, ref := range cfg.Observability.OTLPHeaders {
+		if v, err := ref.Resolve(); err == nil {
+			headers[k] = v
+		}
+	}
+	if a.shutdownTracing, err = observe.SetupTracing(ctx, observe.TracingConfig{Endpoint: cfg.Observability.OTLPEndpoint,
+		Headers: headers, Sample: cfg.Observability.TraceSample}); err != nil {
+		return nil, fmt.Errorf("tracing: %w", err)
+	}
 	a.Admin = admin.New(a.Engine)
 	a.Admin.Reload = a.Reload
+	a.Admin.Diff = a.Diff
 	if cfg.Server.AdminListen == "" {
 		a.Admin.Mount(a.Server.Mux)
 	}
@@ -208,6 +225,26 @@ func (a *App) filesChanged() bool {
 	return false
 }
 
+// RunBackground starts the config poller, discovery, probes and rollups (Serve calls it;
+// tests call it directly).
+func (a *App) RunBackground(ctx context.Context) {
+	go a.background(ctx)
+	go a.Engine.RunProbes(ctx, 15*time.Second)
+}
+
+// Diff compares the configuration files on disk with the running configuration
+// without applying anything [CFG-05].
+func (a *App) Diff(ctx context.Context) (map[string]any, error) {
+	next, err := config.Load(a.opts.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	cur := a.fileCfg
+	a.mu.Unlock()
+	return admin.ConfigDiff(cur, next), nil
+}
+
 // background polls config files, refreshes admin-API state written by other instances
 // (keys, budgets: applied within seconds, BUD-06), discovers models and rolls up old
 // cost records.
@@ -249,13 +286,13 @@ func (a *App) background(ctx context.Context) {
 // Serve runs the HTTP listeners until ctx is done, then drains [RES-10].
 func (a *App) Serve(ctx context.Context) error {
 	cfg := a.Engine.Snapshot().Config
-	go a.background(ctx)
-	go a.Engine.RunProbes(ctx, 15*time.Second)
+	a.RunBackground(ctx)
 	srv := &http.Server{Addr: cfg.Server.Listen, Handler: a.Server.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 2)
 	serve := func(s *http.Server) {
 		a.log.Info("listening", "addr", s.Addr)
 		if cfg.Server.TLSCertFile != "" {
+			s.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12} // ASVS V9.1.3 [NFR-11]
 			errc <- s.ListenAndServeTLS(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
 		} else {
 			errc <- s.ListenAndServe()
@@ -285,7 +322,11 @@ func (a *App) Serve(ctx context.Context) error {
 	if adminSrv != nil {
 		_ = adminSrv.Shutdown(dctx)
 	}
+	a.Engine.WaitShadows()
 	a.Engine.Close()
+	if a.shutdownTracing != nil {
+		_ = a.shutdownTracing(dctx)
+	}
 	if a.redis != nil {
 		a.redis.Close()
 	}

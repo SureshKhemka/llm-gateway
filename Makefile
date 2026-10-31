@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: build test vet race scenarios lmstudio traceability bench demo-up demo-down clean
+.PHONY: build test vet race scenarios lmstudio traceability bench demo-up demo-down clean load chaos soak coverage supply-chain image helm-lint
 
 build:
 	$(GO) build -o bin/ ./cmd/...
@@ -28,6 +28,28 @@ traceability:
 bench:
 	$(GO) test -run '^$$' -bench . -benchmem ./internal/...
 
+# Release suites (record pass/fail from real runs in docs/PROGRESS.md).
+load:
+	./scripts/load.sh
+
+chaos:
+	./scripts/chaos.sh
+
+soak:
+	./scripts/soak.sh
+
+coverage:
+	./scripts/coverage.sh
+
+supply-chain:
+	./scripts/supply-chain.sh
+
+image:
+	docker build -t llm-gateway:dev .
+
+helm-lint:
+	helm lint deploy/helm/llm-gateway
+
 demo-up:
 	./deploy/demo/up.sh
 
@@ -35,4 +57,4 @@ demo-down:
 	./deploy/demo/down.sh
 
 clean:
-	rm -rf bin
+	rm -rf bin dist coverage.out

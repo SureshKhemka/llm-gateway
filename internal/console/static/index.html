@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Gateway Console</title>
+<link rel="stylesheet" href="console.css">
+</head>
+<body>
+<header>
+  <strong>LLM Gateway</strong>
+  <nav id="nav">
+    <a href="#overview">Overview</a>
+    <a href="#health">Health</a>
+    <a href="#catalog">Catalog</a>
+    <a href="#policies">Policies</a>
+    <a href="#tenants">Tenants &amp; keys</a>
+    <a href="#budgets">Budgets</a>
+    <a href="#requests">Requests</a>
+    <a href="#costs">Costs</a>
+    <a href="#evals">Evals</a>
+    <a href="#audit">Audit</a>
+    <a href="#playground">Playground</a>
+  </nav>
+  <span id="who"></span>
+  <button id="logout" type="button">Sign out</button>
+</header>
+<main>
+  <section id="login" hidden>
+    <h1>Sign in</h1>
+    <p>Paste an admin credential. It stays in this tab only (session storage).</p>
+    <form id="login-form">
+      <input id="key" type="password" autocomplete="off" placeholder="admin credential" required>
+      <button type="submit">Sign in</button>
+    </form>
+    <p id="login-error" class="error"></p>
+  </section>
+  <section id="view"></section>
+</main>
+<script src="console.js"></script>
+</body>
+</html>

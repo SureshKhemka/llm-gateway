@@ -10,24 +10,32 @@ import (
 )
 
 // Memory is an in-process Store.
+// Memory is the single-node store (no Postgres). It is not durable, and it keeps only
+// the most recent MaxCostRecords cost records and MaxDecisions route decisions so a
+// long-running instance has bounded memory; budgets live in the counters, not here.
 type Memory struct {
-	mu        sync.RWMutex
-	costs     []CostRecord
-	costIndex map[string]int
-	decisions map[string]DecisionRecord
-	audit     []AuditEntry
-	keys      map[string]KeyRecord
-	policies  map[string][]PolicyVersion
-	docs      map[string]Doc
+	mu             sync.RWMutex
+	MaxCostRecords int
+	MaxDecisions   int
+	costs          []CostRecord
+	costIndex      map[string]int
+	decisions      map[string]DecisionRecord
+	decisionOrder  []string
+	audit          []AuditEntry
+	keys           map[string]KeyRecord
+	policies       map[string][]PolicyVersion
+	docs           map[string]Doc
 }
 
 func NewMemory() *Memory {
 	return &Memory{
-		costIndex: map[string]int{},
-		decisions: map[string]DecisionRecord{},
-		keys:      map[string]KeyRecord{},
-		policies:  map[string][]PolicyVersion{},
-		docs:      map[string]Doc{},
+		MaxCostRecords: 200000, // ~0.5 KB each
+		MaxDecisions:   20000,  // ~2.5 KB each (candidates, exclusions)
+		costIndex:      map[string]int{},
+		decisions:      map[string]DecisionRecord{},
+		keys:           map[string]KeyRecord{},
+		policies:       map[string][]PolicyVersion{},
+		docs:           map[string]Doc{},
 	}
 }
 
@@ -44,6 +52,15 @@ func (m *Memory) InsertCostRecords(_ context.Context, recs []CostRecord) error {
 		}
 		m.costIndex[r.RequestID] = len(m.costs)
 		m.costs = append(m.costs, r)
+	}
+	// Drop the oldest tenth once over the cap, so trimming is amortised.
+	if max := m.MaxCostRecords; max > 0 && len(m.costs) > max {
+		drop := len(m.costs) - max + max/10
+		m.costs = append([]CostRecord(nil), m.costs[drop:]...)
+		m.costIndex = make(map[string]int, len(m.costs))
+		for i, r := range m.costs {
+			m.costIndex[r.RequestID] = i
+		}
 	}
 	return nil
 }
@@ -194,7 +211,17 @@ func (m *Memory) ListCostRecords(_ context.Context, f CostFilter, limit int) ([]
 func (m *Memory) PutDecision(_ context.Context, d DecisionRecord) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, ok := m.decisions[d.RequestID]; !ok {
+		m.decisionOrder = append(m.decisionOrder, d.RequestID)
+	}
 	m.decisions[d.RequestID] = d
+	if max := m.MaxDecisions; max > 0 && len(m.decisionOrder) > max {
+		drop := len(m.decisionOrder) - max + max/10
+		for _, id := range m.decisionOrder[:drop] {
+			delete(m.decisions, id)
+		}
+		m.decisionOrder = append([]string(nil), m.decisionOrder[drop:]...)
+	}
 	return nil
 }
 

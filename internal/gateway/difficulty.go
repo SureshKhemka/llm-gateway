@@ -15,15 +15,16 @@ type Difficulty struct {
 	Signals map[string]float64 `json:"signals"`
 }
 
+// The cue patterns run on lowercased text (cheaper than (?i)); codeSyntax needs case.
 var (
 	codeSyntax   = regexp.MustCompile(`(?m)(\bdef \w+\(|\bfunc \w+\(|\bclass \w+[:({]|\bimport \w+|#include|\bSELECT\b.+\bFROM\b|=>|\);\s*$|\bpublic static\b|\bconsole\.log\(|\bfn \w+\()`)
-	codeAsk      = regexp.MustCompile(`(?i)\b(write|implement|refactor|debug|fix|optimi[sz]e|review|port|unit tests?)\b.{0,40}\b(code|function|class|script|program|query|bug|module|method|endpoint|regex|algorithm|tests?)\b`)
-	reasonCue    = regexp.MustCompile(`(?i)\b(step[- ]by[- ]step|prove|proof|derive|explain why|reason through|trade-?offs?|analy[sz]e|evaluate|justify|compare and contrast|design an?|architect|plan (a|an|the)|how many|calculate|compute|what time|work out|solve)\b`)
-	multiStep    = regexp.MustCompile(`(?i)(\bthen\b|\bafter that\b|\bnext\b|\bfinally\b|^\s*\d+[.)]\s|\bfirst\b.*\bsecond\b)`)
+	codeAsk      = regexp.MustCompile(`\b(write|implement|refactor|debug|fix|optimi[sz]e|review|port|unit tests?)\b.{0,40}\b(code|function|class|script|program|query|bug|module|method|endpoint|regex|algorithm|tests?)\b`)
+	reasonCue    = regexp.MustCompile(`\b(step[- ]by[- ]step|prove|proof|derive|explain why|reason through|trade-?offs?|analy[sz]e|evaluate|justify|compare and contrast|design an?|architect|plan (a|an|the)|how many|calculate|compute|what time|work out|solve)\b`)
+	multiStep    = regexp.MustCompile(`(\bthen\b|\bafter that\b|\bnext\b|\bfinally\b|^\s*\d+[.)]\s|\bfirst\b.*\bsecond\b)`)
 	numbers      = regexp.MustCompile(`\b\d+(\.\d+)?\b`)
-	wordProblem  = regexp.MustCompile(`(?i)\b(how (much|many|long|far|old)|(at )?what time|total (cost|price|time|distance)|change (do|will)|per (hour|day|km|kg|month)|percent(age)?|average|ratio|km/h|interest rate)\b`)
-	taskCue      = regexp.MustCompile(`(?i)\b(extract|classify|categori[sz]e|label|tag|summari[sz]e|translate|rewrite|convert|list|parse|identify|detect|sentiment)\b`)
-	greetingOnly = regexp.MustCompile(`(?i)^\W*(hi|hello|hey|thanks|thank you|good (morning|afternoon|evening)|bye|ok(ay)?|cool|great|cheers)\b[\w\s!,.'?]{0,40}$`)
+	wordProblem  = regexp.MustCompile(`\b(how (much|many|long|far|old)|(at )?what time|total (cost|price|time|distance)|change (do|will)|per (hour|day|km|kg|month)|percent(age)?|average|ratio|km/h|interest rate)\b`)
+	taskCue      = regexp.MustCompile(`\b(extract|classify|categori[sz]e|label|tag|summari[sz]e|translate|rewrite|convert|list|parse|identify|detect|sentiment)\b`)
+	greetingOnly = regexp.MustCompile(`^\W*(hi|hello|hey|thanks|thank you|good (morning|afternoon|evening)|bye|ok(ay)?|cool|great|cheers)\b[\w\s!,.'?]{0,40}$`)
 )
 
 const scanWindow = 4096
@@ -46,6 +47,7 @@ func RuleDifficulty(req *api.ChatRequest, thresholds []float64) Difficulty {
 	if len(last) > 2*scanWindow {
 		last = last[:scanWindow] + "\n" + last[len(last)-scanWindow:]
 	}
+	lower := strings.ToLower(last)
 	switch {
 	case pt > 6000:
 		sig["length"] = 0.4
@@ -59,20 +61,20 @@ func RuleDifficulty(req *api.ChatRequest, thresholds []float64) Difficulty {
 	if hasFence || codeSyntax.MatchString(last) {
 		sig["code"] = 0.3
 	}
-	if codeAsk.MatchString(last) {
+	if codeAsk.MatchString(lower) {
 		sig["code_task"] = 0.45
 	}
-	if n := len(reasonCue.FindAllString(last, 4)); n > 0 {
+	if n := len(reasonCue.FindAllString(lower, 4)); n > 0 {
 		sig["reasoning"] = 0.2 + 0.08*float64(n-1)
 	}
-	if n := len(multiStep.FindAllString(last, 6)); n >= 2 {
+	if n := len(multiStep.FindAllString(lower, 6)); n >= 2 {
 		sig["multi_step"] = 0.06 * float64(min(n, 5))
 	}
 	// Arithmetic word problems trip up small models even when short.
-	if n := len(numbers.FindAllString(last, 12)); n >= 2 && wordProblem.MatchString(last) {
+	if n := len(numbers.FindAllString(lower, 12)); n >= 2 && wordProblem.MatchString(lower) {
 		sig["quantitative"] = 0.45
 	}
-	if taskCue.MatchString(last) {
+	if taskCue.MatchString(lower) {
 		sig["task"] = 0.25
 	}
 	if len(req.Tools) > 0 {
@@ -100,7 +102,8 @@ func RuleDifficulty(req *api.ChatRequest, thresholds []float64) Difficulty {
 	for _, v := range sig {
 		score += v
 	}
-	if greetingOnly.MatchString(strings.TrimSpace(last)) && len(req.Tools) == 0 && pt < 150 {
+	// The greeting pattern allows at most ~60 characters, so longer text can't match.
+	if t := strings.TrimSpace(lower); len(t) <= 80 && greetingOnly.MatchString(t) && len(req.Tools) == 0 && pt < 150 {
 		sig["greeting"] = -score
 		score = 0
 	}

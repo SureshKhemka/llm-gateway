@@ -13,7 +13,9 @@ import (
 
 	"github.com/SureshKhemka/llm-gateway/internal/api"
 	"github.com/SureshKhemka/llm-gateway/internal/catalog"
+	"github.com/SureshKhemka/llm-gateway/internal/observe"
 	"github.com/SureshKhemka/llm-gateway/internal/translate"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // Anthropic talks to the Anthropic Messages API, or any server speaking it (LM Studio's
@@ -60,6 +62,7 @@ func (a *Anthropic) request(ctx context.Context, method, path string, body any) 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	observe.Propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
 	req.Header.Set("anthropic-version", AnthropicVersion)
 	if a.apiKey != "" {
 		req.Header.Set("x-api-key", a.apiKey)

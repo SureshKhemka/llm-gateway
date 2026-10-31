@@ -11,6 +11,9 @@ import (
 	"github.com/SureshKhemka/llm-gateway/internal/observe"
 	"github.com/SureshKhemka/llm-gateway/internal/provider"
 	"github.com/SureshKhemka/llm-gateway/internal/resilience"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // attemptFunc runs one attempt on d.
@@ -21,6 +24,19 @@ type held struct {
 	d       *catalog.Deployment
 	release func()
 	start   time.Time
+	// span is the successful attempt's span; the caller ends it with usage attached.
+	span trace.Span
+}
+
+// endSpan finishes an attempt span with GenAI usage attributes [OBS-03].
+func (h *held) endSpan(u cost.Usage, costUSD float64) {
+	if h == nil || h.span == nil {
+		return
+	}
+	h.span.SetAttributes(observe.GenAIUsage(u.TotalInput(), u.TotalOutput(), h.d.Model)...)
+	h.span.SetAttributes(attribute.Float64("gateway.cost_usd", costUSD), attribute.Bool("gateway.usage_estimated", u.Estimated))
+	h.span.End()
+	h.span = nil
 }
 
 // execute walks the plan's attempt list: it skips deployments whose breaker is open or
@@ -112,12 +128,17 @@ func (e *Engine) execute(ctx context.Context, s *Snapshot, rc *RequestContext, p
 		attempts++
 		lastDep = d.ID
 		start := e.Now()
-		err := run(ctx, d)
+		actx, span := observe.Start(ctx, "chat "+d.Model, trace.SpanKindClient, observe.GenAIRequest(d.Provider, d.Model, "chat")...)
+		span.SetAttributes(attribute.String("gateway.deployment", d.ID), attribute.String("gateway.attempt_kind", kind), attribute.Int("gateway.attempt", attempts))
+		err := run(actx, d)
 		if err == nil {
 			meta.Attempts = append(meta.Attempts, observe.Attempt{Deployment: d.ID, Provider: d.Provider, Kind: kind, Status: "ok"})
 			meta.FallbackAttempts = attempts - 1
-			return &held{d: d, release: release, start: start}, nil
+			return &held{d: d, release: release, start: start, span: span}, nil
 		}
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(attribute.String("error.type", string(provider.AsUpstream(err).Kind)))
+		span.End()
 		release()
 		ue := provider.AsUpstream(err)
 		lat := msSince(e.Now, start)

@@ -20,6 +20,8 @@ const (
 	DocBudget        = "budget"
 	DocGrant         = "budget_grant"
 	DocKeyRevocation = "key_revocation"
+	DocProvider      = "provider"
+	DocDeployment    = "deployment"
 )
 
 // ProjectDoc is a project created through the admin API under a tenant.
@@ -77,6 +79,36 @@ func MergeStored(ctx context.Context, st store.Store, file *config.Config) (*con
 			cfg.Tenants[i].Projects = append(cfg.Tenants[i].Projects, pd.Project)
 			projects[pd.Project.ID] = true
 		}
+	}
+	provIDs := map[string]bool{}
+	for _, p := range cfg.Providers {
+		provIDs[p.ID] = true
+	}
+	if docs, err = st.ListDocs(ctx, DocProvider, ""); err != nil {
+		return nil, nil, nil, err
+	}
+	for _, d := range docs {
+		var p config.Provider
+		if json.Unmarshal(d.Body, &p) != nil || provIDs[p.ID] {
+			continue
+		}
+		provIDs[p.ID] = true
+		cfg.Providers = append(cfg.Providers, p)
+	}
+	depIDs := map[string]bool{}
+	for _, dp := range cfg.Deployments {
+		depIDs[dp.ID] = true
+	}
+	if docs, err = st.ListDocs(ctx, DocDeployment, ""); err != nil {
+		return nil, nil, nil, err
+	}
+	for _, d := range docs {
+		var dp config.Deployment
+		if json.Unmarshal(d.Body, &dp) != nil || depIDs[dp.ID] {
+			continue
+		}
+		depIDs[dp.ID] = true
+		cfg.Deployments = append(cfg.Deployments, dp)
 	}
 	budgetIDs := map[string]bool{}
 	for _, b := range cfg.Budgets {

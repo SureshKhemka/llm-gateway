@@ -444,3 +444,24 @@ func TestRTE11_SessionPinning(t *testing.T) {
 		t.Fatalf("session stuck on an unhealthy deployment: %d %s", r.Status, r.Header.Get("X-Gw-Served-Model"))
 	}
 }
+
+// When no candidate can meet the latency target, the closest one goes first rather than
+// the cheapest (the target can't be met, so cost no longer decides).
+// Covers: RTE-05
+func TestRTE05_ClosestToLatencyTargetWhenNoneMeetsIt(t *testing.T) {
+	env := testenv.New(t, testenv.Options{YAML: `
+providers:
+  - {id: sima, type: openai, base_url: "${SIM_SIMA_URL}"}
+deployments:
+  - {id: slow-cheap, provider: sima, model: qwen-4b, tier: 1, latency: {ttft_ms: 3000, tokens_per_sec: 50},
+     prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.1, output: 0.1}]}
+  - {id: fast-dear, provider: sima, model: qwen-9b, tier: 1, latency: {ttft_ms: 900, tokens_per_sec: 200},
+     prices: [{effective_from: 2026-01-01T00:00:00Z, input: 1.0, output: 1.0}]}
+policies:
+  - {name: default, objective: min_cost, latency_target_ms: 100}
+`})
+	r := env.Chat("", "auto", "hello", nil)
+	if r.Status != 200 || r.Header.Get("X-Gw-Served-Model") != "fast-dear" || r.Header.Get("X-Gw-Route-Reason") != "closest_to_latency_target" {
+		t.Fatalf("served %s (%s), want fast-dear (closest_to_latency_target)", r.Header.Get("X-Gw-Served-Model"), r.Header.Get("X-Gw-Route-Reason"))
+	}
+}

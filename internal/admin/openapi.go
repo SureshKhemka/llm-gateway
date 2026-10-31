@@ -3,6 +3,7 @@ package admin
 import (
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -11,6 +12,11 @@ var pathParam = regexp.MustCompile(`\{([a-z_]+)(\.\.\.)?\}`)
 // openapi serves an OpenAPI 3.1 document generated from the route table, so the
 // published contract cannot drift from the handlers [ADM-01].
 func (x *API) openapi(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, 200, x.OpenAPI())
+}
+
+// OpenAPI returns the document (also committed as docs/api/openapi.json).
+func (x *API) OpenAPI() map[string]any {
 	paths := map[string]map[string]any{}
 	for _, rt := range x.Routes() {
 		p := paths[rt.Path]
@@ -31,6 +37,7 @@ func (x *API) openapi(w http.ResponseWriter, _ *http.Request) {
 				}
 			}
 		}
+		sort.Strings(roles)
 		op := map[string]any{
 			"summary":      rt.Summary,
 			"operationId":  strings.ToLower(rt.Method) + strings.NewReplacer("/admin/v1/", "_", "/", "_", "{", "", "}", "").Replace(rt.Path),
@@ -59,5 +66,5 @@ func (x *API) openapi(w http.ResponseWriter, _ *http.Request) {
 			"adminKey": map[string]any{"type": "http", "scheme": "bearer", "description": "Admin credential (separate from virtual API keys)"},
 		}},
 	}
-	writeJSON(w, 200, doc)
+	return doc
 }

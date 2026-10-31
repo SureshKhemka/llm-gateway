@@ -1,0 +1,9 @@
+# Secret scanning [NFR-15, NFR-16]. Test fixtures are fake values; allow them by value
+# (not by path) so a real secret added to a test file is still caught.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "fake test fixtures"
+regexTarget = "match"
+regexes = ['''body-key-0123456789abcdef''']

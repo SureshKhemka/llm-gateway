@@ -143,7 +143,16 @@ type Memory struct {
 	mu      sync.Mutex
 	lru     *list.List
 	entries map[string]*list.Element // ns|key -> element(*memEntry)
-	vectors map[string][]Candidate   // ns|bucket
+	vectors map[string]*memBucket    // ns|bucket
+	// MaxBuckets bounds the number of semantic buckets (one per distinct conversation
+	// prefix and output parameters); expired and then least recently written buckets go.
+	MaxBuckets int
+}
+
+type memBucket struct {
+	cands   []Candidate
+	expires time.Time
+	written time.Time
 }
 
 type memEntry struct {
@@ -152,7 +161,7 @@ type memEntry struct {
 }
 
 func NewMemory() *Memory {
-	return &Memory{lru: list.New(), entries: map[string]*list.Element{}, vectors: map[string][]Candidate{}}
+	return &Memory{lru: list.New(), entries: map[string]*list.Element{}, vectors: map[string]*memBucket{}, MaxBuckets: 20000}
 }
 
 func (m *Memory) Get(_ context.Context, ns, key string) (*Entry, error) {
@@ -194,26 +203,67 @@ func (m *Memory) Put(_ context.Context, e *Entry, ttl time.Duration, maxEntries 
 func (m *Memory) Candidates(_ context.Context, ns, bucket string) ([]Candidate, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]Candidate(nil), m.vectors[ns+"|"+bucket]...), nil
+	b := m.vectors[ns+"|"+bucket]
+	if b == nil {
+		return nil, nil
+	}
+	if time.Now().After(b.expires) {
+		delete(m.vectors, ns+"|"+bucket)
+		return nil, nil
+	}
+	return append([]Candidate(nil), b.cands...), nil
 }
 
-func (m *Memory) PutVector(_ context.Context, ns, bucket string, c Candidate, maxPerBucket int, _ time.Duration) error {
+func (m *Memory) PutVector(_ context.Context, ns, bucket string, c Candidate, maxPerBucket int, ttl time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := time.Now()
 	k := ns + "|" + bucket
-	vs := m.vectors[k]
-	for i := range vs {
-		if vs[i].Key == c.Key {
-			vs[i] = c
+	b := m.vectors[k]
+	if b == nil || now.After(b.expires) {
+		b = &memBucket{}
+		m.vectors[k] = b
+		m.pruneBuckets(now)
+	}
+	b.written, b.expires = now, now.Add(ttl)
+	for i := range b.cands {
+		if b.cands[i].Key == c.Key {
+			b.cands[i] = c
 			return nil
 		}
 	}
-	vs = append(vs, c)
-	if maxPerBucket > 0 && len(vs) > maxPerBucket {
-		vs = vs[len(vs)-maxPerBucket:]
+	b.cands = append(b.cands, c)
+	if maxPerBucket > 0 && len(b.cands) > maxPerBucket {
+		b.cands = b.cands[len(b.cands)-maxPerBucket:]
 	}
-	m.vectors[k] = vs
 	return nil
+}
+
+// pruneBuckets runs when a bucket is added beyond MaxBuckets: it drops expired buckets,
+// then the least recently written tenth, so the sweep is amortised.
+func (m *Memory) pruneBuckets(now time.Time) {
+	if m.MaxBuckets <= 0 || len(m.vectors) <= m.MaxBuckets {
+		return
+	}
+	for k, b := range m.vectors {
+		if now.After(b.expires) {
+			delete(m.vectors, k)
+		}
+	}
+	if over := len(m.vectors) - m.MaxBuckets*9/10; over > 0 {
+		type kv struct {
+			k string
+			t time.Time
+		}
+		all := make([]kv, 0, len(m.vectors))
+		for k, b := range m.vectors {
+			all = append(all, kv{k, b.written})
+		}
+		sort.Slice(all, func(i, j int) bool { return all[i].t.Before(all[j].t) })
+		for _, x := range all[:over] {
+			delete(m.vectors, x.k)
+		}
+	}
 }
 
 func (m *Memory) Invalidate(_ context.Context, ns string, f Filter) (int, error) {

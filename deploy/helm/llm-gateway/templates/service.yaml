@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gw.fullname" . }}
+  labels:
+    {{- include "gw.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "gw.selector" . | nindent 4 }}
+  ports:
+    - {name: http, port: {{ .Values.service.port }}, targetPort: http}
+    {{- if .Values.service.adminPort }}
+    - {name: admin, port: {{ .Values.service.adminPort }}, targetPort: admin}
+    {{- end }}

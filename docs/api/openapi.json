@@ -1,0 +1,1586 @@
+{
+  "components": {
+    "securitySchemes": {
+      "adminKey": {
+        "description": "Admin credential (separate from virtual API keys)",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "LLM Gateway Admin API",
+    "version": "v1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/admin/v1/audit": {
+      "get": {
+        "operationId": "get_audit",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Audit log",
+        "x-permission": "audit:read",
+        "x-roles": [
+          "auditor",
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/budgets": {
+      "get": {
+        "operationId": "get_budgets",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "List budgets with current-period status",
+        "x-permission": "budgets:read",
+        "x-roles": [
+          "auditor",
+          "finops_viewer",
+          "org_admin",
+          "tenant_admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_budgets",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Create or update an API-managed budget",
+        "x-permission": "budgets:write",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/budgets/{id}/grants": {
+      "post": {
+        "operationId": "post_budgets_id_grants",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Grant a temporary budget increase",
+        "x-permission": "budgets:write",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/cache/invalidate": {
+      "post": {
+        "operationId": "post_cache_invalidate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Invalidate cache entries",
+        "x-permission": "cache:write",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/catalog": {
+      "get": {
+        "operationId": "get_catalog",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Deployments, price cards and discovered (unregistered) models",
+        "x-permission": "health:read",
+        "x-roles": [
+          "auditor",
+          "finops_viewer",
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/catalog/{id...}": {
+      "post": {
+        "operationId": "post_catalog_id...",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Approve a discovered model with metadata",
+        "x-permission": "catalog:write",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/chargeback": {
+      "get": {
+        "operationId": "get_chargeback",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Monthly chargeback report per tenant",
+        "x-permission": "costs:read",
+        "x-roles": [
+          "finops_viewer",
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/config": {
+      "get": {
+        "operationId": "get_config",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Effective configuration (secret references only)",
+        "x-permission": "config:read",
+        "x-roles": [
+          "auditor",
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/config/diff": {
+      "post": {
+        "operationId": "post_config_diff",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Preview what reloading the configuration files would change",
+        "x-permission": "config:read",
+        "x-roles": [
+          "auditor",
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/config/reload": {
+      "post": {
+        "operationId": "post_config_reload",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Re-read configuration files",
+        "x-permission": "config:write",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/costs": {
+      "get": {
+        "operationId": "get_costs",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Aggregate cost, tokens and savings (JSON or CSV)",
+        "x-permission": "costs:read",
+        "x-roles": [
+          "finops_viewer",
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/deployments": {
+      "get": {
+        "operationId": "get_deployments",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "List deployments with tier, prices and capabilities",
+        "x-permission": "config:read",
+        "x-roles": [
+          "auditor",
+          "org_admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_deployments",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Create or update an API-managed deployment (price card, tier, capabilities)",
+        "x-permission": "config:write",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/deployments/{id...}": {
+      "delete": {
+        "operationId": "delete_deployments_id...",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Delete an API-managed deployment",
+        "x-permission": "config:write",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/evals/replay": {
+      "post": {
+        "operationId": "post_evals_replay",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Replay captured production requests against a candidate policy",
+        "x-permission": "evals:run",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/evals/runs": {
+      "get": {
+        "operationId": "get_evals_runs",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "List eval runs",
+        "x-permission": "evals:read",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_evals_runs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Start an eval run across deployments and policy versions",
+        "x-permission": "evals:run",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/evals/runs/{id}": {
+      "get": {
+        "operationId": "get_evals_runs_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "An eval run's status and report",
+        "x-permission": "evals:read",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/evals/runs/{id}/pareto.svg": {
+      "get": {
+        "operationId": "get_evals_runs_id_pareto.svg",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Quality-versus-cost chart for a run",
+        "x-permission": "evals:read",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/evals/runs/{id}/recommend": {
+      "post": {
+        "operationId": "post_evals_runs_id_recommend",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Recommend difficulty and semantic-cache thresholds",
+        "x-permission": "evals:read",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/evals/suites": {
+      "get": {
+        "operationId": "get_evals_suites",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "List eval suites",
+        "x-permission": "evals:read",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_evals_suites",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Create or replace an eval suite (JSON or JSONL body)",
+        "x-permission": "evals:run",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/health": {
+      "get": {
+        "operationId": "get_health",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Deployment health and circuit breakers",
+        "x-permission": "health:read",
+        "x-roles": [
+          "auditor",
+          "finops_viewer",
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/keys": {
+      "get": {
+        "operationId": "get_keys",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "List virtual keys (metadata only)",
+        "x-permission": "keys:read",
+        "x-roles": [
+          "auditor",
+          "org_admin",
+          "tenant_admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_keys",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Create a virtual key; the secret is returned once",
+        "x-permission": "keys:write",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/keys/{id}/revoke": {
+      "post": {
+        "operationId": "post_keys_id_revoke",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Revoke a key (effective on every instance within seconds)",
+        "x-permission": "keys:write",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/keys/{id}/rotate": {
+      "post": {
+        "operationId": "post_keys_id_rotate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Rotate a key with an overlap window",
+        "x-permission": "keys:write",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/overview": {
+      "get": {
+        "operationId": "get_overview",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Live overview: requests/s, spend and savings today, cache hit rate, errors",
+        "x-permission": "costs:read",
+        "x-roles": [
+          "finops_viewer",
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/playground/explain": {
+      "post": {
+        "operationId": "post_playground_explain",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Playground: route decision and per-candidate estimates (no model call)",
+        "x-permission": "playground:use",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/playground/run": {
+      "post": {
+        "operationId": "post_playground_run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Playground: run a prompt on one or more models side by side",
+        "x-permission": "playground:use",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/policies": {
+      "get": {
+        "operationId": "get_policies",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Policies with their versions",
+        "x-permission": "policies:read",
+        "x-roles": [
+          "auditor",
+          "org_admin",
+          "tenant_admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_policies",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Create a new (inactive) policy version",
+        "x-permission": "policies:write",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/policies/{name}/activate": {
+      "post": {
+        "operationId": "post_policies_name_activate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Activate a policy version (promotion gate)",
+        "x-permission": "policies:write",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/policies/{name}/diff": {
+      "get": {
+        "operationId": "get_policies_name_diff",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Field-level diff between two policy versions",
+        "x-permission": "policies:read",
+        "x-roles": [
+          "auditor",
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/policies/{name}/rollback": {
+      "post": {
+        "operationId": "post_policies_name_rollback",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Roll back to a prior policy version",
+        "x-permission": "policies:write",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/providers": {
+      "get": {
+        "operationId": "get_providers",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "List providers (secret references only)",
+        "x-permission": "config:read",
+        "x-roles": [
+          "auditor",
+          "org_admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_providers",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Create or update an API-managed provider (api_key must be env: or file:)",
+        "x-permission": "config:write",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/providers/{id}": {
+      "delete": {
+        "operationId": "delete_providers_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Delete an API-managed provider",
+        "x-permission": "config:write",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/quality": {
+      "get": {
+        "operationId": "get_quality",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Online quality signals by route",
+        "x-permission": "costs:read",
+        "x-roles": [
+          "finops_viewer",
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/requests": {
+      "get": {
+        "operationId": "get_requests",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Recent requests (request explorer)",
+        "x-permission": "requests:read",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/requests/{id}": {
+      "get": {
+        "operationId": "get_requests_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "One request's cost record and route decision",
+        "x-permission": "requests:read",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/tenants": {
+      "get": {
+        "operationId": "get_tenants",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "List tenants (tenant admins see their own)",
+        "x-permission": "tenants:read",
+        "x-roles": [
+          "auditor",
+          "finops_viewer",
+          "org_admin",
+          "tenant_admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_tenants",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Create a tenant",
+        "x-permission": "tenants:write",
+        "x-roles": [
+          "org_admin"
+        ]
+      }
+    },
+    "/admin/v1/tenants/{tenant}/projects": {
+      "post": {
+        "operationId": "post_tenants_tenant_projects",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "Create a project in a tenant",
+        "x-permission": "keys:write",
+        "x-roles": [
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    },
+    "/admin/v1/whoami": {
+      "get": {
+        "operationId": "get_whoami",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "unauthorized"
+          },
+          "403": {
+            "description": "forbidden (role lacks permission)"
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ],
+        "summary": "The calling admin's identity and permissions",
+        "x-permission": "",
+        "x-roles": [
+          "auditor",
+          "finops_viewer",
+          "org_admin",
+          "tenant_admin"
+        ]
+      }
+    }
+  }
+}

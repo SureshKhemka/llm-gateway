@@ -1,0 +1,36 @@
+:root { --bg:#fff; --fg:#111827; --muted:#6b7280; --line:#e5e7eb; --card:#f9fafb; --accent:#2563eb; --bad:#dc2626; --ok:#16a34a; --warn:#d97706; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0b0f17; --fg:#e5e7eb; --muted:#9ca3af; --line:#1f2937; --card:#111827; --accent:#60a5fa; --bad:#f87171; --ok:#4ade80; --warn:#fbbf24; } }
+* { box-sizing: border-box; }
+body { margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--fg); }
+header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); }
+nav { display:flex; flex-wrap:wrap; gap:4px; flex:1; }
+nav a { color:var(--muted); text-decoration:none; padding:4px 8px; border-radius:6px; }
+nav a.active, nav a:hover { color:var(--fg); background:var(--card); }
+#who { color:var(--muted); font-size:12px; }
+main { padding:16px; max-width:1200px; margin:0 auto; }
+h1 { font-size:20px; margin:4px 0 12px; } h2 { font-size:16px; margin:20px 0 8px; }
+.cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+.card .v { font-size:22px; font-weight:600; } .card .k { color:var(--muted); font-size:12px; }
+table { width:100%; border-collapse:collapse; font-size:13px; display:block; overflow-x:auto; }
+th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; vertical-align:top; }
+th { color:var(--muted); font-weight:500; }
+tr.click { cursor:pointer; } tr.click:hover { background:var(--card); }
+.pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; background:var(--card); border:1px solid var(--line); }
+.ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); } .muted { color:var(--muted); }
+.error { color:var(--bad); }
+.bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; min-width:120px; }
+.bar > i { display:block; height:100%; background:var(--accent); }
+.bar.hot > i { background:var(--warn); } .bar.over > i { background:var(--bad); }
+pre { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px; overflow:auto; max-height:480px; font-size:12px; }
+input, select, textarea, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+textarea { width:100%; min-height:90px; }
+button { cursor:pointer; background:var(--accent); color:#fff; border:none; }
+button.secondary { background:var(--card); color:var(--fg); border:1px solid var(--line); }
+form.inline { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:8px 0; }
+.grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:12px; }
+.chart svg { width:100%; max-width:720px; height:auto; color:var(--fg); }
+/* Pareto chart (SVG from the admin API; its inline <style> is blocked by the CSP). */
+.chart text { font:12px system-ui, sans-serif; fill:currentColor; }
+.chart .f { fill:var(--accent); } .chart .d { fill:var(--muted); }
+.chart .l { stroke:var(--accent); stroke-width:2; fill:none; } .chart .a { stroke:var(--muted); }

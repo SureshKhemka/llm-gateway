@@ -7,7 +7,8 @@ import (
 	"testing"
 )
 
-// The user's inventory as of 2026-10-31 (CLAUDE.md).
+// The user's inventory as of 2026-10-31 (CLAUDE.md) maps to the roles the suite needs.
+// Covers: ENV-01
 func TestClassifyInventory(t *testing.T) {
 	want := map[string]Role{
 		"google/gemma-4-31b":                   RoleTier3,

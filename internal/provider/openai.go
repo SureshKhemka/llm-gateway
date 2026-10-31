@@ -17,6 +17,8 @@ import (
 
 	"github.com/SureshKhemka/llm-gateway/internal/api"
 	"github.com/SureshKhemka/llm-gateway/internal/catalog"
+	"github.com/SureshKhemka/llm-gateway/internal/observe"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // OpenAI talks to any OpenAI-compatible server: LM Studio, vLLM, Ollama, OpenRouter,
@@ -67,6 +69,7 @@ func (o *OpenAI) newRequest(ctx context.Context, method, path string, body any) 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	observe.Propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
 	for k, v := range o.headers {
 		req.Header.Set(k, v)
 	}

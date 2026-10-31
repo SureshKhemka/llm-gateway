@@ -1,0 +1,60 @@
+# LM Studio on the host (macOS). Added to the demo by `LMSTUDIO=1 deploy/demo/up.sh`.
+# From containers the host is host.docker.internal; without Docker it is localhost.
+# Model IDs match the inventory in CLAUDE.md; prices are synthetic and keep the spec's
+# tier ratios (ENV-03). See docs/LMSTUDIO.md for the LM Studio settings these need.
+providers:
+  - id: lmstudio
+    type: openai
+    base_url: ${LMSTUDIO_BASE_URL:-http://localhost:1234/v1}
+    discover: true           # new models appear in the console catalog for approval
+    probe_every: 15s
+    timeouts: {connect: 2s, ttft: 120s, idle: 60s, total: 600s}   # cold loads are slow
+
+deployments:
+  - id: lmstudio/gemma-4-26b-a4b
+    provider: lmstudio
+    model: gemma-4-26b-a4b-it-mlx
+    tier: 2
+    capabilities: [chat, tools, json_schema]
+    context_window: 16384   # = the loaded context length (docs/LMSTUDIO.md)
+    concurrency: 2           # = LM Studio's Max Concurrent Predictions for this model
+    queue_wait: 30s
+    residency: [local]
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.50, output: 2.00}]
+  - id: lmstudio/devstral-small
+    provider: lmstudio
+    model: mistralai/devstral-small-2-2512
+    tier: 2
+    capabilities: [chat, tools, json_schema]   # the code model; select it by ID or policy
+    context_window: 32768
+    concurrency: 2           # = LM Studio's Max Concurrent Predictions for this model
+    queue_wait: 30s
+    residency: [local]
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.50, output: 2.00}]
+  - id: lmstudio/qwen3.8-27b
+    provider: lmstudio
+    model: qwen/qwen3.8-27b
+    tier: 3
+    capabilities: [chat, tools, json_schema, reasoning]
+    context_window: 16384   # = the loaded context length (docs/LMSTUDIO.md)
+    concurrency: 2           # = LM Studio's Max Concurrent Predictions for this model
+    queue_wait: 30s
+    residency: [local]
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 3.00, output: 15.00}]
+  - id: lmstudio/gemma-4-31b
+    provider: lmstudio
+    model: google/gemma-4-31b
+    tier: 3
+    capabilities: [chat, tools, json_schema]
+    context_window: 16384   # = the loaded context length (docs/LMSTUDIO.md)
+    concurrency: 2           # = LM Studio's Max Concurrent Predictions for this model
+    queue_wait: 30s
+    residency: [local]
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 3.00, output: 15.00}]
+  - id: lmstudio/nomic-embed
+    provider: lmstudio
+    model: text-embedding-nomic-embed-text-v1.5
+    tier: 0
+    capabilities: [embeddings]
+    residency: [local]
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.02, output: 0}]

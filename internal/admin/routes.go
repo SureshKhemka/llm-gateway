@@ -39,12 +39,21 @@ func (x *API) routes() {
 	x.add("GET", "/admin/v1/requests", "Recent requests (request explorer)", PermRequestsRead, x.listRequests)
 	x.add("GET", "/admin/v1/requests/{id}", "One request's cost record and route decision", PermRequestsRead, x.getRequest)
 
+	x.add("GET", "/admin/v1/providers", "List providers (secret references only)", PermConfigRead, x.listProviders)
+	x.add("POST", "/admin/v1/providers", "Create or update an API-managed provider (api_key must be env: or file:)", PermConfigWrite, x.putProvider)
+	x.add("DELETE", "/admin/v1/providers/{id}", "Delete an API-managed provider", PermConfigWrite, x.deleteProvider)
+	x.add("GET", "/admin/v1/deployments", "List deployments with tier, prices and capabilities", PermConfigRead, x.listDeployments)
+	x.add("POST", "/admin/v1/deployments", "Create or update an API-managed deployment (price card, tier, capabilities)", PermConfigWrite, x.putDeployment)
+	x.add("DELETE", "/admin/v1/deployments/{id...}", "Delete an API-managed deployment", PermConfigWrite, x.deleteDeployment)
+
 	x.add("GET", "/admin/v1/audit", "Audit log", PermAuditRead, x.listAudit)
 	x.add("GET", "/admin/v1/health", "Deployment health and circuit breakers", PermHealthRead, x.health)
 	x.add("GET", "/admin/v1/config", "Effective configuration (secret references only)", PermConfigRead, x.getConfig)
 	x.add("POST", "/admin/v1/config/reload", "Re-read configuration files", PermConfigWrite, x.reload)
+	x.add("POST", "/admin/v1/config/diff", "Preview what reloading the configuration files would change", PermConfigRead, x.configDiff)
 	x.add("POST", "/admin/v1/cache/invalidate", "Invalidate cache entries", PermCacheWrite, x.invalidateCache)
 	x.evalRoutes()
+	x.consoleRoutes()
 }
 
 func (x *API) whoami(w http.ResponseWriter, _ *http.Request, a *Admin) {
@@ -146,6 +155,116 @@ func (x *API) putDoc(ctx context.Context, kind, id, tenant string, v any) error 
 		return err
 	}
 	return nil
+}
+
+// ---------- providers and deployments [ADM-01, CFG-01] ----------
+
+func (x *API) listProviders(w http.ResponseWriter, _ *http.Request, _ *Admin) {
+	s := x.Engine.Snapshot()
+	out := []map[string]any{}
+	for _, p := range s.Config.Providers {
+		managed := "api"
+		if fileManaged(s, gateway.DocProvider, p.ID) {
+			managed = "file"
+		}
+		out = append(out, map[string]any{"provider": p, "managed": managed})
+	}
+	writeJSON(w, 200, map[string]any{"data": out})
+}
+
+func (x *API) putProvider(w http.ResponseWriter, r *http.Request, a *Admin) {
+	var p config.Provider
+	if err := decode(r, &p); err != nil {
+		api.WriteError(w, api.FormatOpenAI, err)
+		return
+	}
+	x.putConfigDoc(w, r, a, gateway.DocProvider, p.ID, p)
+}
+
+func (x *API) listDeployments(w http.ResponseWriter, _ *http.Request, _ *Admin) {
+	s := x.Engine.Snapshot()
+	out := []map[string]any{}
+	for _, d := range s.Config.Deployments {
+		managed := "api"
+		if fileManaged(s, gateway.DocDeployment, d.ID) {
+			managed = "file"
+		}
+		out = append(out, map[string]any{"deployment": d, "managed": managed})
+	}
+	writeJSON(w, 200, map[string]any{"data": out})
+}
+
+func (x *API) putDeployment(w http.ResponseWriter, r *http.Request, a *Admin) {
+	var d config.Deployment
+	if err := decode(r, &d); err != nil {
+		api.WriteError(w, api.FormatOpenAI, err)
+		return
+	}
+	x.putConfigDoc(w, r, a, gateway.DocDeployment, d.ID, d)
+}
+
+// putConfigDoc stores an org-level object; the rebuild validates it with the rest of the
+// configuration (so a literal api_key or an unknown provider is rejected) [CFG-04].
+func (x *API) putConfigDoc(w http.ResponseWriter, r *http.Request, a *Admin, kind, id string, v any) {
+	if a.Tenant != "" {
+		fail(w, api.CodeForbidden, "%s objects are organisation-wide", kind)
+		return
+	}
+	if id == "" {
+		fail(w, api.CodeInvalidRequest, "id is required")
+		return
+	}
+	s := x.Engine.Snapshot()
+	if fileManaged(s, kind, id) {
+		managedConflict(w, kind, id)
+		return
+	}
+	prev, _ := x.Engine.Store.GetDoc(r.Context(), kind, id)
+	var before any
+	if prev != nil {
+		before = json.RawMessage(prev.Body)
+	}
+	if err := x.putDoc(r.Context(), kind, id, "", v); err != nil {
+		fail(w, api.CodeInvalidRequest, "%v", err)
+		return
+	}
+	x.audit(r.Context(), a, "", map[bool]string{true: "update", false: "create"}[prev != nil], kind, id, before, v, "")
+	writeJSON(w, 200, v)
+}
+
+func (x *API) deleteProvider(w http.ResponseWriter, r *http.Request, a *Admin) {
+	x.deleteConfigDoc(w, r, a, gateway.DocProvider, r.PathValue("id"))
+}
+
+func (x *API) deleteDeployment(w http.ResponseWriter, r *http.Request, a *Admin) {
+	x.deleteConfigDoc(w, r, a, gateway.DocDeployment, r.PathValue("id"))
+}
+
+func (x *API) deleteConfigDoc(w http.ResponseWriter, r *http.Request, a *Admin, kind, id string) {
+	if a.Tenant != "" {
+		fail(w, api.CodeForbidden, "%s objects are organisation-wide", kind)
+		return
+	}
+	if fileManaged(x.Engine.Snapshot(), kind, id) {
+		managedConflict(w, kind, id)
+		return
+	}
+	prev, _ := x.Engine.Store.GetDoc(r.Context(), kind, id)
+	if prev == nil {
+		fail(w, api.CodeNotFound, "no API-managed %s %q", kind, id)
+		return
+	}
+	if err := x.Engine.Store.DeleteDoc(r.Context(), kind, id); err != nil {
+		fail(w, api.CodeInternal, "%v", err)
+		return
+	}
+	if err := x.rebuild(r.Context(), "admin:delete:"+kind); err != nil {
+		_ = x.Engine.Store.PutDoc(r.Context(), *prev) // e.g. a deployment still uses this provider
+		fail(w, api.CodeInvalidRequest, "%v", err)
+		return
+	}
+	x.audit(r.Context(), a, "", "delete", kind, id, json.RawMessage(prev.Body), nil, "")
+	w.WriteHeader(204)
 }
 
 // ---------- keys [TEN-02, TEN-03] ----------
@@ -709,4 +828,46 @@ func (x *API) invalidateCache(w http.ResponseWriter, r *http.Request, a *Admin) 
 	}
 	x.audit(r.Context(), a, tenant, "invalidate", "cache", tenant, nil, req, "")
 	writeJSON(w, 200, map[string]any{"invalidated": n})
+}
+
+func (x *API) configDiff(w http.ResponseWriter, r *http.Request, _ *Admin) {
+	if x.Diff == nil {
+		fail(w, api.CodeInvalidRequest, "this gateway was not started from configuration files")
+		return
+	}
+	d, err := x.Diff(r.Context())
+	if err != nil {
+		writeJSON(w, 422, map[string]any{"valid": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"valid": true, "changes": d})
+}
+
+// ConfigDiff lists changes between two configurations, keyed by section and object ID
+// (deployments, providers, policies, tenants, budgets by id; other sections by field).
+func ConfigDiff(cur, next *config.Config) map[string]any {
+	toMap := func(c *config.Config) map[string]any {
+		b, _ := json.Marshal(c)
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		for _, sec := range []string{"providers", "deployments", "policies", "tenants", "budgets", "virtual_models", "alerts", "admins"} {
+			list, _ := m[sec].([]any)
+			byID := map[string]any{}
+			for _, item := range list {
+				obj, _ := item.(map[string]any)
+				id := fmt.Sprint(obj["id"])
+				if obj["id"] == nil {
+					id = fmt.Sprint(obj["name"])
+					if v, ok := obj["version"]; ok {
+						id += fmt.Sprintf("@%v", v)
+					}
+				}
+				byID[id] = obj
+			}
+			m[sec] = byID
+		}
+		delete(m, "Files")
+		return m
+	}
+	return diffMaps("", toMap(cur), toMap(next))
 }

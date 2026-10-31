@@ -343,6 +343,7 @@ func TestRTE16_RuleRoutingOverheadP95(t *testing.T) {
 	if raceEnabled {
 		t.Skip("timing assertion is meaningless under the race detector")
 	}
+	testenv.ExclusiveCPU(t)
 	env := m2Env(t)
 	items, err := workload.Load("../../testdata/corpus/corpus.jsonl")
 	if err != nil {

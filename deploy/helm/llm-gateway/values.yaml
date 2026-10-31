@@ -1,0 +1,74 @@
+replicaCount: 2
+
+image:
+  repository: llm-gateway
+  tag: ""            # defaults to the chart appVersion
+  pullPolicy: IfNotPresent
+
+# Gateway configuration (the same YAML as gateway.yaml). Secrets must be env: or file:
+# references (CFG-04); supply their values through existingSecret / extraEnv.
+config: |
+  server:
+    listen: ":8080"
+    reload_every: 5s
+  storage:
+    redis_url: env:REDIS_URL
+    postgres_dsn: env:POSTGRES_DSN
+    wal_dir: /var/lib/gateway/wal
+  providers: []
+  deployments: []
+
+# Name of a Secret whose keys become environment variables (REDIS_URL, POSTGRES_DSN,
+# provider API keys, admin and virtual keys referenced as env:NAME in the config).
+existingSecret: ""
+extraEnv: []
+
+service:
+  type: ClusterIP
+  port: 8080
+  # Optional separate admin listener (NFR-11); set server.admin_listen in config too.
+  adminPort: 0
+
+ingress:
+  enabled: false
+  className: ""
+  host: gateway.example.com
+  tls: []
+
+resources:
+  requests: {cpu: "1", memory: 1Gi}
+  limits: {cpu: "4", memory: 8Gi}
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Long enough for in-flight streams to finish (server.drain_timeout + margin).
+terminationGracePeriodSeconds: 60
+
+serviceMonitor:
+  enabled: false
+  interval: 15s
+
+prometheusRule:
+  enabled: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+  seccompProfile: {type: RuntimeDefault}
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: [ALL]}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

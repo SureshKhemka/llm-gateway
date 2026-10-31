@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/SureshKhemka/llm-gateway/internal/api"
 	"github.com/SureshKhemka/llm-gateway/internal/config"
+	"github.com/SureshKhemka/llm-gateway/internal/console"
 	"github.com/SureshKhemka/llm-gateway/internal/gateway"
 	"github.com/SureshKhemka/llm-gateway/internal/governance"
 	"github.com/SureshKhemka/llm-gateway/internal/store"
@@ -78,8 +80,11 @@ type API struct {
 	Engine *gateway.Engine
 	// Reload re-reads configuration files and rebuilds the snapshot (config apply).
 	Reload func(ctx context.Context, reason string) error
-	mux    *http.ServeMux
-	route  []Route
+	// Diff previews what a reload would change [CFG-05].
+	Diff     func(ctx context.Context) (map[string]any, error)
+	mux      *http.ServeMux
+	route    []Route
+	throttle *authThrottle
 }
 
 type CacheInvalidation struct {
@@ -97,16 +102,26 @@ type Route struct {
 }
 
 func New(e *gateway.Engine) *API {
-	x := &API{Engine: e, mux: http.NewServeMux()}
+	x := &API{Engine: e, mux: http.NewServeMux(), throttle: newAuthThrottle()}
 	x.routes()
 	for _, rt := range x.route {
 		rt := rt
 		x.mux.HandleFunc(rt.Method+" "+rt.Path, func(w http.ResponseWriter, r *http.Request) {
+			securityHeaders(w)
+			addr := remoteHost(r)
+			if wait, locked := x.throttle.blocked(addr); locked {
+				w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+				api.WriteError(w, api.FormatOpenAI, api.NewError(api.CodeRateLimited, "too many failed admin authentications"))
+				return
+			}
 			adm, err := x.authenticate(r)
 			if err != nil {
+				x.throttle.fail(addr)
+				x.Engine.Log.Warn("admin authentication failed", "remote", addr, "path", r.URL.Path)
 				api.WriteError(w, api.FormatOpenAI, err)
 				return
 			}
+			x.throttle.succeed(addr)
 			if rt.Perm != "" && !adm.Can(rt.Perm) {
 				api.WriteError(w, api.FormatOpenAI, api.NewError(api.CodeForbidden, "role %s lacks permission %s", adm.Role, rt.Perm))
 				return
@@ -120,8 +135,21 @@ func New(e *gateway.Engine) *API {
 
 func (x *API) Handler() http.Handler { return x.mux }
 
-// Mount registers the admin API on mux.
-func (x *API) Mount(mux *http.ServeMux) { mux.Handle("/admin/", x.mux) }
+// securityHeaders are set on every admin response [NFR-13].
+func securityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+}
+
+// Mount registers the admin API and the console on mux.
+func (x *API) Mount(mux *http.ServeMux) {
+	mux.Handle("/admin/", x.mux)
+	console.Mount(mux)
+}
 
 func (x *API) add(method, path, summary string, perm Perm, h func(w http.ResponseWriter, r *http.Request, a *Admin)) {
 	x.route = append(x.route, Route{Method: method, Path: path, Summary: summary, Perm: perm, h: h})
@@ -215,6 +243,18 @@ func fileManaged(s *gateway.Snapshot, kind, id string) bool {
 	case gateway.DocBudget:
 		for _, b := range fc.Budgets {
 			if b.ID == id {
+				return true
+			}
+		}
+	case gateway.DocProvider:
+		for _, p := range fc.Providers {
+			if p.ID == id {
+				return true
+			}
+		}
+	case gateway.DocDeployment:
+		for _, d := range fc.Deployments {
+			if d.ID == id {
 				return true
 			}
 		}

@@ -4,7 +4,9 @@ Milestones follow spec §9.2. Requirement coverage by test is in
 [`docs/TRACEABILITY.md`](TRACEABILITY.md) (regenerate with `make traceability`).
 
 Verification environment for every entry below, unless stated otherwise: Linux cloud
-container (16 vCPU, 15 GB), Go 1.26, no GPU, no Docker daemon, no LM Studio. The LM
+container (15 GB RAM; M1–M7 ran on 16 vCPU, M8's measurements on **4 vCPU**), Go 1.26, no
+GPU, no LM Studio. There was no Docker daemon through M7; for M8 `dockerd` was started in
+the container to test the image and the Compose demo. The LM
 Studio suite (`make lmstudio`) has to be run on the Mac; its results are recorded here only
 after a real run.
 
@@ -413,3 +415,97 @@ at equal predicted quality, and v2 measured $0.0095 versus $0.0200.
   one. The API supports this, because the gate uses whatever run the caller names.
 - All quality numbers come from the simulator's tier model. Real numbers need the LM
   Studio lineup and a real judge model.
+
+## M8 — Production hardening ✅
+
+**Shipped**
+
+- **Observability:** Prometheus metrics (requests, errors, tokens, cost, savings, cache,
+  fallbacks and escalations; overhead/TTFT/duration histograms; circuit, in-flight, queue
+  and budget gauges) with bounded labels. OpenTelemetry root span per request with
+  children for auth, routing, cache, each upstream attempt and the cascade.
+  `/livez` and `/readyz`. Grafana dashboard (16 panels) and 10 Prometheus alert rules, each
+  with a runbook in `docs/runbooks/`.
+- **Console** (`/console/`, strict CSP): overview, health, catalog approval, policies,
+  tenants, budgets, request explorer with route decisions, costs, evals with Pareto
+  charts, audit log and a playground (explain, plus side-by-side runs).
+- **Admin API completeness:** providers and deployments can be created, updated and
+  deleted through the API (files still win; a literal `api_key` is rejected). The OpenAPI
+  3.1 document is generated from the route table, committed as `docs/api/openapi.json`,
+  and checked for drift by a test. The new `gwctl` CLI covers keys, tenants, policies,
+  budgets, providers, deployments, config, evals, costs, cache and raw calls.
+- **Config:** `POST /admin/v1/config/diff` previews a reload. File changes are applied by
+  polling, by `SIGHUP` or by the API.
+- **Packaging:** distroless non-root image (22.6 MB of content). Helm chart (Deployment,
+  ConfigMap, Service, PDB, HPA, Ingress, ServiceMonitor, PrometheusRule).
+  `deploy/demo/up.sh` and `down.sh` bring up the demo with Docker Compose (gateway, Redis,
+  Postgres, simulators, Prometheus, Grafana) or with local binaries and no Docker. An LM
+  Studio overlay matches the Mac's inventory.
+- **Backup and restore:** `scripts/backup.sh` (pg_dump archive, config tarball, row
+  counts, checksums; restore in one transaction).
+- **Security:** a threat model and ASVS L2 checklist (`docs/SECURITY.md`). Failed admin
+  authentication is throttled per address. TLS 1.2 is the minimum. The console's escaping
+  is checked in Chromium with an `onerror` payload.
+- **Supply chain:** `scripts/supply-chain.sh` runs govulncheck, writes CycloneDX SBOMs,
+  runs gitleaks, and signs with cosign when a key is set. The toolchain is pinned to
+  go1.26.10.
+- **Suites:** `cmd/loadtest` + `scripts/load.sh`, `cmd/chaos` + `scripts/chaos.sh`,
+  `scripts/soak.sh` and `scripts/coverage.sh`. There are provider contract tests for both
+  provider types, and a traceability test asserting that every MUST has a test, every test
+  has `Covers:`, and `docs/TRACEABILITY.md` is current.
+- **Docs:** operator guide, API reference, policy authoring guide, eval guide, LM Studio
+  settings, security, runbooks and a README. A docs test checks that every route is
+  documented, that every alert has a runbook, that dashboards and alerts use only
+  exported metrics, that the LM Studio overlay validates, and that links resolve.
+
+**Fixed during M8 (found by measurement)**
+
+- **Breaker statistics were 45% of request-path CPU.** Every request sorted the latency
+  window. Now failures are counted incrementally and p95 is recomputed lazily. The
+  benchmark went from ~1.03 ms/op to **0.146 ms/op**.
+- **Latency target with no feasible candidate fell back to cheapest** (chaos slowdown
+  phase). It now orders candidates by estimated latency (`closest_to_latency_target`).
+- **Unbounded memory in single-node mode** (soak run 1). The memory store kept every cost
+  record and route decision, and the memory cache never dropped semantic buckets. Both
+  are now bounded: 200k cost records, 20k decisions, 20k buckets with TTL.
+- **The demo load script left processes running.** Backgrounded shell functions
+  outlived the trap, so a later run measured a stale binary.
+- **37 reachable standard-library vulnerabilities in go1.26.0 plus golang.org/x/net
+  v0.59.0.** The toolchain moved to go1.26.10 and x/net was upgraded; govulncheck now
+  reports none.
+- **Timing tests flaked under `go test ./...`** because the load test saturates all 4
+  CPUs from another package. CPU-sensitive tests now share a cross-process lock.
+
+**Requirement IDs covered by tests:** OBS-01 … OBS-07, ADM-01 … ADM-05, CFG-01 … CFG-05,
+NFR-01 … NFR-23, ENV-02, ENV-07, PRV-08, TEN-01, plus regression tests for RTE-05,
+CCH-02/05/07/08/09. **MUST coverage: 116 / 116** (`docs/TRACEABILITY.md`).
+
+**Exit scenarios and measurements** (4 vCPU container; where the gateway, simulator and
+load generator share those CPUs, the numbers are a lower bound for a dedicated 4-vCPU
+instance):
+
+| Item | Result |
+| --- | --- |
+| 14 Hot reload | Pass. A price change and a new deployment applied **310 ms** after the file changed; the in-flight stream was not dropped. An invalid file is rejected with file/path errors and the running config kept. |
+| 15 Observability of a cascaded request | Pass. One trace with a span per attempt; the event, metrics and request explorer agree. |
+| NFR-01/02/04 overhead (in process) | Non-streaming p50 **0.20**, p95 **0.32**, p99 **0.52 ms**; streaming p95 **0.19 ms**; exact-hit end to end p95 **0.59 ms**. |
+| RTE-16 routing (rules, full corpus) | p50 0.13 ms, p95 **2.4 ms** (budget 5 ms), p99 6.1 ms. The tail is regex work on long prompts. |
+| NFR-10 scale | Snapshot with 10k tenants, 100k keys, 500 deployments and 1,000 policy versions built in **348 ms**; routing p95 1.0 ms. |
+| NFR-03 throughput (`scripts/load.sh`) | Non-streaming **4,909 req/s**, 0 errors, p95 98 ms at 256 concurrency. **5,000 concurrent streams**: 0 errors, TTFT p50 1.6 s / p95 3.8 s, with the CPU saturated by all three processes. In the Go test: 4,484 req/s, and peak 4,852 streams open at once with 0 errors. |
+| NFR-09 horizontal scaling | Two instances sharing Redis behind round robin: 0 errors (4,582 req/s on the same 4 CPUs). **Near-linear scaling to 10 instances was not measured**; it needs separate hosts (`INSTANCES=N scripts/load.sh`). |
+| Chaos (`scripts/chaos.sh`, 15 s/phase, 24 clients, 2 gateways + Redis) | **All 7 phases pass.** Baseline 0 errors. Provider kill: 1 of 31,950 requests failed (`upstream_unavailable`), then traffic moved to the twin. Recovery: traffic returned to the cheaper provider with 0 errors. Slowdown (+2.5 s): latency-sensitive traffic moved off with 0 errors. 429 storm: 0 client errors. Mid-stream drops: 117 streams cut before the breaker opened (each ended with an error event, none hung) and 0 non-streaming errors. Instance kill: 24 failures, all in flight on the killed instance, and 0 afterwards. |
+| Soak (`scripts/soak.sh`) | Run 1 (8 min, memory-only mode, before the fix): **fail**, RSS ×2.18 with 0 errors; led to the memory bounds above. Run 2 (10 min, Redis + Postgres, 200 req/s + streams): **pass**: 132,350 requests, 0 errors, RSS ×1.07, goroutines ×1.03, FDs ×1.04. **The 24-hour soak has not been run.** |
+| NFR-21 coverage (`scripts/coverage.sh`) | Routing **90.5%**, budget **92.3%**, cost **87.5%**, cache **93.6%**. |
+| NFR-15 supply chain | govulncheck: no vulnerabilities. gitleaks over history and tree: no leaks. SBOMs written. **No image has been signed** (needs a release key and registry). |
+| NFR-17 / ENV-07 packaging | `docker build` OK. `up.sh` + `down.sh` pass in Docker mode (all 6 containers; Prometheus loaded 10 rules; Grafana provisioned the dashboard; cost records in Postgres) and in no-Docker mode. `helm lint` and `helm template` pass with helm 3.18.4. **The chart has not been installed on a cluster** (kind, ENV-08, not run). |
+| NFR-19 backup | Backup → verify → restore into a fresh database: totals, keys, policy versions, API objects and config match; the restored audit log is still append-only; a corrupted archive is refused. |
+| NFR-13 ASVS L2 | Self-assessment in `docs/SECURITY.md`. **Gap: no built-in MFA/SSO for admins** (deploy behind an identity-aware proxy). No third-party pen test. |
+| Default / race suites | `go vet`, `go test ./...` and `go test -race ./...` green. Postgres store tests green against PostgreSQL. Scenario suite (23 tests with the real SDKs, Claude Code CLI and Chromium) green. |
+
+**Still needs real hardware or a real run**
+
+- LM Studio suite on the Mac (`make lmstudio`). Tier 0–2 and vision models must be loaded
+  first (docs/LMSTUDIO.md §5).
+- 24 h soak; NFR-03 on a dedicated 4-vCPU instance; NFR-09 across up to 10 hosts.
+- Helm install on kind with LM Studio on the host (ENV-08, SHOULD).
+- Signed release image; built-in admin MFA/SSO.

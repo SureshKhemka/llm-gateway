@@ -19,6 +19,11 @@ import (
 	"github.com/SureshKhemka/llm-gateway/internal/api"
 	"github.com/SureshKhemka/llm-gateway/internal/gateway"
 	"github.com/SureshKhemka/llm-gateway/internal/governance"
+	"github.com/SureshKhemka/llm-gateway/internal/observe"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Server struct {
@@ -26,8 +31,10 @@ type Server struct {
 	Log    *slog.Logger
 	// Ready reports readiness: config loaded and ≥1 provider reachable [OBS-05].
 	Ready func() (bool, string)
-	// Extra routes (admin API, metrics, console) are mounted by the caller.
+	// Extra routes (admin API, console) are mounted by the caller.
 	Mux *http.ServeMux
+	// Metrics, when set, is served at /metrics [OBS-02].
+	Metrics *observe.Metrics
 
 	inFlight atomic.Int64
 	draining atomic.Bool
@@ -52,6 +59,13 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("GET /v1/route/decisions/{id}", s.handleDecision)
 	s.Mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	s.Mux.HandleFunc("GET /readyz", s.handleReady)
+	s.Mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		if s.Metrics == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.Metrics.Handler().ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) Handler() http.Handler { return s.Mux }
@@ -70,9 +84,52 @@ func (s *Server) track(h http.HandlerFunc) http.HandlerFunc {
 			api.WriteError(w, formatOf(r), api.NewError(api.CodeOverloaded, "gateway is shutting down"))
 			return
 		}
-		h(w, r)
+		// Continue the caller's trace and open the request's root span [OBS-03].
+		ctx := observe.Propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := observe.Start(ctx, "gateway.request "+r.URL.Path, trace.SpanKindServer,
+			attribute.String("http.request.method", r.Method), attribute.String("url.path", r.URL.Path))
+		rec := &recorder{ResponseWriter: w, status: 200}
+		h(rec, r.WithContext(ctx))
+		hd := rec.Header()
+		span.SetAttributes(attribute.Int("http.response.status_code", rec.status),
+			attribute.String("gateway.request_id", hd.Get("X-Request-Id")), attribute.String("gateway.served_model", hd.Get("X-Gw-Served-Model")),
+			attribute.String("gateway.cache_status", hd.Get("X-Gw-Cache")), attribute.String("gateway.route_reason", hd.Get("X-Gw-Route-Reason")))
+		if c := hd.Get("X-Gw-Cost-Usd"); c != "" {
+			span.SetAttributes(attribute.String("gateway.cost_usd", c))
+		}
+		if rec.status >= 500 {
+			span.SetStatus(codes.Error, hd.Get("X-Gw-Error-Code"))
+		}
+		span.End()
 	}
 }
+
+// recorder captures the status code while keeping streaming (Flusher) working.
+type recorder struct {
+	http.ResponseWriter
+	status int
+	wrote  bool
+}
+
+func (r *recorder) WriteHeader(code int) {
+	if !r.wrote {
+		r.status, r.wrote = code, true
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *recorder) Write(b []byte) (int, error) {
+	r.wrote = true
+	return r.ResponseWriter.Write(b)
+}
+
+func (r *recorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 // Drain stops accepting requests and waits for in-flight ones up to ctx [RES-10].
 func (s *Server) Drain(ctx context.Context) error {
@@ -130,6 +187,8 @@ func clientIP(r *http.Request) netip.Addr {
 // Authenticate resolves the caller [TEN-02, TEN-03]. With no keys configured the
 // gateway runs in open single-tenant mode (minimal config, CFG-07).
 func (s *Server) Authenticate(r *http.Request, endpoint string) (*governance.Principal, *api.Error) {
+	_, span := observe.Start(r.Context(), "gateway.auth", trace.SpanKindInternal)
+	defer span.End()
 	snap := s.Engine.Snapshot()
 	tok := bearer(r)
 	if snap.Keys.Len() == 0 {
@@ -188,7 +247,11 @@ func (s *Server) newRC(r *http.Request, endpoint string, f api.Format) *gateway.
 	if rid == "" || len(rid) > 128 {
 		rid = gateway.NewRequestID()
 	}
-	return &gateway.RequestContext{ID: rid, Start: time.Now(), Endpoint: endpoint, Format: f, ClientIP: clientIP(r)}
+	rc := &gateway.RequestContext{ID: rid, Start: time.Now(), Endpoint: endpoint, Format: f, ClientIP: clientIP(r)}
+	if sc := trace.SpanContextFromContext(r.Context()); sc.IsValid() {
+		rc.TraceID = sc.TraceID().String()
+	}
+	return rc
 }
 
 func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, *api.Error) {

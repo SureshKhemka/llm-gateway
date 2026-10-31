@@ -1,0 +1,74 @@
+# Alert rules for the top failure modes [OBS-07]. Every alert links to its runbook in
+# docs/runbooks/ (kept in sync by TestOBS07_DashboardsAlertsAndRunbooks).
+groups:
+  - name: llm-gateway
+    rules:
+      - alert: GatewayDown
+        expr: up{job="llm-gateway"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Gateway instance {{ $labels.instance }} is not being scraped"
+          runbook_url: docs/runbooks/GatewayDown.md
+      - alert: GatewayHighErrorRate
+        expr: sum(rate(gw_requests_total{status="5xx"}[5m])) / clamp_min(sum(rate(gw_requests_total[5m])), 1e-9) > 0.05
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "More than 5% of requests fail with a gateway or upstream error"
+          runbook_url: docs/runbooks/GatewayHighErrorRate.md
+      - alert: CircuitOpen
+        expr: max by (deployment) (gw_circuit_state) == 2
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Circuit breaker open for {{ $labels.deployment }}"
+          runbook_url: docs/runbooks/CircuitOpen.md
+      - alert: GatewayOverheadHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(gw_gateway_overhead_seconds_bucket{stream="false"}[5m]))) > 0.015
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Gateway-added latency p95 above 15 ms (NFR-01)"
+          runbook_url: docs/runbooks/GatewayOverheadHigh.md
+      - alert: SlowFirstToken
+        expr: histogram_quantile(0.95, sum by (le, model) (rate(gw_time_to_first_token_seconds_bucket[5m]))) > 10
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "TTFT p95 above 10 s for {{ $labels.model }}"
+          runbook_url: docs/runbooks/SlowFirstToken.md
+      - alert: BudgetNearLimit
+        expr: max by (budget) (gw_budget_utilisation_ratio) >= 0.9
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Budget {{ $labels.budget }} is at {{ $value | humanizePercentage }} of its hard limit"
+          runbook_url: docs/runbooks/BudgetNearLimit.md
+      - alert: BudgetExhausted
+        expr: max by (budget) (gw_budget_utilisation_ratio) >= 1
+        labels: {severity: critical}
+        annotations:
+          summary: "Budget {{ $labels.budget }} is exhausted; its requests get budget_exceeded (402)"
+          runbook_url: docs/runbooks/BudgetExhausted.md
+      - alert: HighFallbackRate
+        expr: sum(rate(gw_fallbacks_total[5m])) / clamp_min(sum(rate(gw_requests_total[5m])), 1e-9) > 0.10
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 10% of requests need a fallback attempt"
+          runbook_url: docs/runbooks/HighFallbackRate.md
+      - alert: DeploymentQueueBacklog
+        expr: max by (deployment) (gw_deployment_queue_depth) > 50
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.deployment }} has more than 50 requests waiting for a concurrency slot"
+          runbook_url: docs/runbooks/DeploymentQueueBacklog.md
+      - alert: CostSpike
+        expr: sum(rate(gw_cost_usd_total[15m])) > 3 * sum(rate(gw_cost_usd_total[6h] offset 1d))
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Spend rate is more than 3x the same window yesterday"
+          runbook_url: docs/runbooks/CostSpike.md

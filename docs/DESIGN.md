@@ -387,10 +387,51 @@ runtime via `POST /_sim/faults` (per instance, optionally per model): `latency_m
 `drop_after_tokens`, `malformed_json`, `omit_usage`, `down`. The same package is embedded
 in tests via `httptest`.
 
-## 14. Deployment
+## 14. Deployment [NFR-17, ENV-07]
 
-Single container image (distroless), Helm chart (`deploy/helm/llm-gateway`) with gateway
-Deployment (≥2 replicas, PDB, readiness gate), optional bundled Redis/Postgres for dev.
-`make demo-up` / `make demo-down` brings up gateway + Redis + Postgres + simulated provider +
-Prometheus/Grafana + seeded tenants via Docker Compose, reaching LM Studio at
-`host.docker.internal:1234` [NFR-17, ENV-07].
+- **Image:** one distroless, non-root image (`Dockerfile`) with `gateway` as entrypoint
+  plus `simprovider`, `gwctl`, `workload` and `loadtest`. The toolchain is pinned
+  (`toolchain` in `go.mod`, `golang:1.26.10` builder) so stdlib fixes are picked up
+  deliberately.
+- **Helm chart** (`deploy/helm/llm-gateway`): Deployment (2 replicas, `maxUnavailable: 0`,
+  readiness/liveness on `/readyz`/`/livez`, read-only root filesystem, non-root,
+  termination grace above `drain_timeout`), ConfigMap with the gateway YAML (hot-reloaded,
+  no restart), Service, PDB, optional HPA, Ingress (proxy buffering off for streams),
+  ServiceMonitor and PrometheusRule (`files/alerts.yml`, kept identical to
+  `deploy/observability/alerts.yml` by test). Redis and Postgres are external.
+- **Demo:** `deploy/demo/up.sh` / `down.sh`. With Docker: Compose stack of gateway, Redis,
+  Postgres, the simulator (two instances), Prometheus (with the alert rules) and Grafana
+  (provisioned dashboard). Without Docker: local binaries, `redis-server` if present,
+  memory store. Secrets are generated once into `deploy/demo/.run/env`. `LMSTUDIO=1` adds
+  `deploy/demo/overlays/lmstudio.yaml` (host LM Studio via `host.docker.internal`).
+
+## 15. Operations (M8)
+
+- **Admin API completeness [ADM-01]:** providers and deployments are API-manageable
+  objects (`DocProvider`, `DocDeployment`) merged like tenants and budgets: files win, the
+  API refuses to change a file-defined ID, and a rebuild validates the merged result (so
+  a literal `api_key` or a provider still referenced by a deployment is rejected and the
+  stored change is rolled back). The OpenAPI document is generated from the route table
+  and committed as `docs/api/openapi.json`; a test fails if it drifts.
+- **CLI [ADM-04]:** `cmd/gwctl` is a thin client of the admin API (same permissions).
+- **Admin authentication throttle [NFR-13]:** 10 failed authentications per address per
+  minute lock that address out for a minute (`429` + `Retry-After`).
+- **Bounded single-node state [NFR-05]:** without Postgres the memory store keeps the
+  most recent 200k cost records and 20k decisions (≈150 MB); without Redis the memory cache keeps
+  `max_entries` responses and at most 20k semantic buckets, each expiring with the TTL.
+  Both bounds came out of the soak test.
+- **Breaker statistics:** the window's failure count is maintained incrementally and its
+  p95 is recomputed lazily (at most every 200 ms under load, and only when a latency
+  threshold is configured). Sorting the window on every request had been ~45% of
+  request-path CPU.
+- **Latency target with no feasible candidate [RTE-05]:** when no candidate's estimate
+  meets `latency_target_ms`, candidates are ordered by estimated latency instead of cost
+  (route reason `closest_to_latency_target`); found by the chaos suite's slowdown phase.
+- **Backups [NFR-19]:** `scripts/backup.sh` (pg_dump custom archive + config tarball +
+  row counts + SHA-256), restore in one transaction with checksum and row-count checks.
+- **Release gate [NFR-15]:** `scripts/supply-chain.sh` — govulncheck, CycloneDX SBOMs,
+  gitleaks, optional cosign signing.
+- **Suites [NFR-21]:** `cmd/loadtest` + `scripts/load.sh` (throughput, streams),
+  `cmd/chaos` + `scripts/chaos.sh` (provider kill/recovery, slowdown, 429 storm,
+  mid-stream drop, instance kill behind a retrying LB), `scripts/soak.sh` (steady load,
+  memory/goroutine/FD growth checks).

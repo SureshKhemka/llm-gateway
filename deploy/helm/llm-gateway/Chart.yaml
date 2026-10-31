@@ -1,0 +1,6 @@
+apiVersion: v2
+name: llm-gateway
+description: Cost-aware LLM gateway (OpenAI- and Anthropic-compatible) [NFR-17]
+type: application
+version: 0.8.0
+appVersion: "0.8.0"

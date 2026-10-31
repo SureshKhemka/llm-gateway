@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	_ "net/http/pprof" // served only on GATEWAY_PPROF (a loopback address)
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/SureshKhemka/llm-gateway/internal/app"
 )
+
+var version = "dev" // set with -ldflags "-X main.version=..."
 
 func main() {
 	cfgPath := flag.String("config", envOr("GATEWAY_CONFIG", "gateway.yaml"), "config file or directory")
@@ -30,6 +33,7 @@ func main() {
 		fmt.Println("configuration OK")
 		return
 	}
+	log.Info("starting", "version", version)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -37,6 +41,12 @@ func main() {
 	if err != nil {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)
+	}
+	if addr := os.Getenv("GATEWAY_PPROF"); addr != "" {
+		// Profiling for operators; never on the public listener.
+		go func() {
+			log.Info("pprof listening", "addr", addr, "err", http.ListenAndServe(addr, http.DefaultServeMux))
+		}()
 	}
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)

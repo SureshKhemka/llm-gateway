@@ -21,6 +21,9 @@ import (
 	"github.com/SureshKhemka/llm-gateway/internal/resilience"
 	"github.com/SureshKhemka/llm-gateway/internal/store"
 	"github.com/SureshKhemka/llm-gateway/internal/tokens"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // EstimatorFunc is a pluggable difficulty estimator (similarity, classifier). It returns
@@ -45,7 +48,9 @@ type Engine struct {
 	Hooks      RouteHooks
 	Estimators map[string]EstimatorFunc
 	Cache      cache.Store
-	shadows    sync.WaitGroup
+	// OnSwap runs after every snapshot swap (metrics label sets, alert sinks).
+	OnSwap  []func(*Snapshot)
+	shadows sync.WaitGroup
 }
 
 type EngineOptions struct {
@@ -121,6 +126,9 @@ func (e *Engine) Swap(s *Snapshot) {
 	e.Health.SetConfig(BreakerConfig(s))
 	e.Gov.FailOpen = s.Config.Storage.BudgetsFailOpen
 	e.Gov.Alerts.SetSinks(s.Config.Alerts)
+	for _, f := range e.OnSwap {
+		f(s)
+	}
 }
 
 // govern applies rate limits and reserves budget before any upstream call [BUD-03,
@@ -209,6 +217,24 @@ func (e *Engine) plan(s *Snapshot, rc *RequestContext, req *api.ChatRequest) (*P
 		MinTier: d.Tier, MaxTier: d.Tier, Reason: "explicit_model", Ordered: []string{d.ID}, EstCostUSD: estCost,
 		Candidates: []CandidateInfo{{Deployment: d.ID, Provider: d.Provider, Tier: d.Tier, EstCostUSD: estCost, EstLatencyMs: estLat}}}
 	return p, nil
+}
+
+// tracedPlan wraps routing in a span [OBS-03].
+func (e *Engine) tracedPlan(ctx context.Context, s *Snapshot, rc *RequestContext, req *api.ChatRequest) (*Plan, error) {
+	_, span := observe.Start(ctx, "gateway.route", trace.SpanKindInternal)
+	defer span.End()
+	p, err := e.plan(s, rc, req)
+	if p != nil {
+		span.SetAttributes(attribute.String("gateway.policy", p.PolicyName), attribute.Int("gateway.policy_version", p.PolicyVersion),
+			attribute.String("gateway.route_reason", p.Reason), attribute.Int("gateway.candidates", len(p.Attempts)))
+		if p.Decision != nil {
+			span.SetAttributes(attribute.Float64("gateway.difficulty", p.Decision.Difficulty))
+		}
+	}
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return p, err
 }
 
 // Explain plans a request without calling any model and at no cost [RTE-15].
@@ -310,7 +336,10 @@ func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequ
 		return nil, e.failPlan(s, rc, meta, nil, aerr), aerr
 	}
 	pol := e.policyFor(s, rc, req.Model)
-	ent, status, _, lk := e.lookupCache(ctx, s, rc, req, pol)
+	cctx, cspan := observe.Start(ctx, "gateway.cache.lookup", trace.SpanKindInternal)
+	ent, status, _, lk := e.lookupCache(cctx, s, rc, req, pol)
+	cspan.SetAttributes(attribute.String("gateway.cache_status", status))
+	cspan.End()
 	meta.CacheStatus = status
 	if ent != nil {
 		// The lookup embedding is absorbed by the gateway: hits bill exactly the cache price.
@@ -320,7 +349,7 @@ func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequ
 		}
 	}
 	rc.overheadUSD += lk.overheadUSD
-	p, err := e.plan(s, rc, req)
+	p, err := e.tracedPlan(ctx, s, rc, req)
 	if err != nil {
 		return nil, e.failPlan(s, rc, meta, p, err), err
 	}
@@ -379,6 +408,7 @@ func (e *Engine) runChat(ctx context.Context, s *Snapshot, rc *RequestContext, r
 		bd := cost.Of(d, rc.Start, u)
 		last := &meta.Attempts[len(meta.Attempts)-1]
 		last.CostUSD, last.LatencyMs = bd.Total(), elapsed
+		h.endSpan(u, bd.Total())
 		accept := func(valid bool) (*api.ChatResponse, bool, error) {
 			e.Pins.Set(rc, d.ID)
 			meta.Deployment, meta.Provider = d.ID, d.Provider
@@ -604,6 +634,7 @@ type ChatStream struct {
 	release  func()
 	lookup   *cacheLookup
 	replayed bool
+	held     *held
 }
 
 // FinishReason returns the upstream finish reason seen so far.
@@ -698,7 +729,10 @@ func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.Ch
 		return &ChatStream{Meta: meta}, aerr
 	}
 	pol := e.policyFor(s, rc, req.Model)
-	ent, status, _, lk := e.lookupCache(ctx, s, rc, req, pol)
+	cctx, cspan := observe.Start(ctx, "gateway.cache.lookup", trace.SpanKindInternal)
+	ent, status, _, lk := e.lookupCache(cctx, s, rc, req, pol)
+	cspan.SetAttributes(attribute.String("gateway.cache_status", status))
+	cspan.End()
 	meta.CacheStatus = status
 	cs := &ChatStream{e: e, s: s, rc: rc, req: req, Meta: meta, lookup: lk}
 	if ent != nil {
@@ -708,7 +742,7 @@ func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.Ch
 		}
 	}
 	rc.overheadUSD += lk.overheadUSD
-	p, err := e.plan(s, rc, req)
+	p, err := e.tracedPlan(ctx, s, rc, req)
 	if err != nil {
 		e.failPlan(s, rc, meta, p, err)
 		return &ChatStream{Meta: meta}, err
@@ -743,6 +777,7 @@ func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.Ch
 		return &ChatStream{Meta: meta}, gerr
 	}
 	cs.release = h.release
+	cs.held = h
 	meta.Deployment, meta.Provider = h.d.ID, h.d.Provider
 	return cs, nil
 }
@@ -840,6 +875,13 @@ func (cs *ChatStream) Close(clientErr error) *Meta {
 	}
 	last := &m.Attempts[len(m.Attempts)-1]
 	last.CostUSD, last.LatencyMs, last.TTFTMs = m.Cost.Total(), m.UpstreamMs, m.TTFTMs
+	if cs.held != nil && cs.held.span != nil {
+		cs.held.span.SetAttributes(attribute.Float64("gateway.ttft_ms", m.TTFTMs), attribute.Bool("gateway.stream", true))
+		if cs.FailErr != nil {
+			cs.held.span.SetStatus(codes.Error, cs.FailErr.Error())
+		}
+		cs.held.endSpan(m.Usage, m.Cost.Total())
+	}
 	if clientErr == nil && cs.FailErr == nil {
 		asm := cs.assembled()
 		if cs.finish != "length" {

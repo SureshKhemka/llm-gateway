@@ -110,6 +110,7 @@ type Env struct {
 	Server   *server.Server
 	HTTP     *httptest.Server
 	Events   *observe.Recorder
+	Metrics  *observe.Metrics
 	Store    store.Store
 	cleanup  []func()
 }
@@ -165,6 +166,10 @@ func New(t testing.TB, o Options) *Env {
 	env.Engine = gateway.NewEngine(snap, gateway.EngineOptions{Store: env.Store, Events: env.Events, Counters: env.Counters})
 	env.Engine.Gov.WatchRevocations(context.Background())
 	env.Server = server.New(env.Engine, nil)
+	env.Metrics = observe.NewMetrics()
+	env.Engine.WireMetrics(env.Metrics)
+	env.Engine.Events = observe.Multi{env.Events, env.Metrics}
+	env.Server.Metrics = env.Metrics
 	env.Admin = admin.New(env.Engine)
 	env.Admin.Mount(env.Server.Mux)
 	if o.Setup != nil {

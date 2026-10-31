@@ -357,7 +357,10 @@ func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm
 			meeting, below = filter(meeting), filter(below)
 		}
 	}
-	// Latency target: drop candidates that miss it, unless none would remain [RTE-05].
+	// Latency target: drop candidates that miss it [RTE-05]. If none meets it, the
+	// constraint can't be satisfied, so the candidates closest to it go first instead
+	// of the cheapest.
+	missedTarget := false
 	if c.latencyTarget != nil {
 		var ok []ranked
 		for _, r := range meeting {
@@ -365,17 +368,24 @@ func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm
 				ok = append(ok, r)
 			}
 		}
-		if len(ok) > 0 && len(ok) < len(meeting) {
+		switch {
+		case len(ok) > 0 && len(ok) < len(meeting):
 			for _, r := range meeting {
 				if r.info.EstLatencyMs > *c.latencyTarget {
 					dec.Exclusions = append(dec.Exclusions, Exclusion{Deployment: r.d.ID, Reasons: []string{fmt.Sprintf("over_latency_target:%.0f>%.0f", r.info.EstLatencyMs, *c.latencyTarget)}})
 				}
 			}
 			meeting = ok
+		case len(ok) == 0 && len(meeting) > 1:
+			missedTarget = true
 		}
 	}
 
-	e.rankByObjective(pol, meeting)
+	if missedTarget {
+		sort.SliceStable(meeting, func(i, j int) bool { return meeting[i].info.EstLatencyMs < meeting[j].info.EstLatencyMs })
+	} else {
+		e.rankByObjective(pol, meeting)
+	}
 	// Below the difficulty tier: best tier first, kept as a last resort so a request is
 	// served rather than failed when nothing at its tier is available [RES-08 safe:
 	// difficulty is a preference, not a hard constraint].
@@ -393,6 +403,9 @@ func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm
 		"max_quality": "highest_tier_within_cost", "weighted": "best_weighted_score"}[pol.Objective]
 	if len(meeting) == 0 && len(below) > 0 {
 		reason = "below_difficulty_tier"
+	}
+	if missedTarget {
+		reason = "closest_to_latency_target"
 	}
 	if dec.Cascade {
 		reason = "cascade_start"
