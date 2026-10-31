@@ -142,8 +142,9 @@ func Build(cfg *config.Config) *Catalog {
 	for _, vm := range cfg.VirtualModels {
 		c.VirtualModels[vm.Name] = &VirtualModel{Name: vm.Name, Policy: vm.Policy, Deployments: vm.Deployments, Description: vm.Description}
 	}
-	// Built-in virtual models map to built-in policies [API-07].
-	for name, policy := range map[string]string{"auto": cfg.Defaults.Policy, "auto-fast": "auto-fast", "auto-cheap": "auto-cheap"} {
+	// Built-in virtual models map to built-in policies [API-07]; "auto" has none of its
+	// own, so scope policies and the global default apply to it.
+	for name, policy := range map[string]string{"auto": "", "auto-fast": "auto-fast", "auto-cheap": "auto-cheap"} {
 		if _, ok := c.VirtualModels[name]; !ok {
 			c.VirtualModels[name] = &VirtualModel{Name: name, Policy: policy}
 		}

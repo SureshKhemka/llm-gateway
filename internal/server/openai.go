@@ -186,3 +186,43 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	rc.Principal = p
 	writeJSON(w, http.StatusOK, s.Engine.Models(rc))
 }
+
+// handleExplain returns the route decision for a chat request without calling any
+// model; nothing is billed [RTE-15].
+func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
+	rc, req, aerr := s.prepareChat(w, r, "chat")
+	if aerr != nil {
+		api.WriteError(w, api.FormatOpenAI, aerr)
+		return
+	}
+	rc.Endpoint = "explain"
+	dec, err := s.Engine.Explain(rc, req)
+	if err != nil {
+		var ge *api.Error
+		if errors.As(err, &ge) && dec != nil {
+			writeJSON(w, ge.Status, map[string]any{"error": map[string]any{"code": ge.Code, "message": ge.Message}, "decision": dec})
+			return
+		}
+		writeErr(w, api.FormatOpenAI, nil, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"decision": dec, "cost_usd": 0})
+}
+
+// handleDecision returns the stored decision record for one of the caller's requests
+// [RTE-14]. Callers only see their own tenant's records [TEN-06].
+func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
+	p, aerr := s.Authenticate(r, "chat")
+	if aerr != nil {
+		api.WriteError(w, api.FormatOpenAI, aerr)
+		return
+	}
+	s.Engine.Writer.Flush()
+	rec, err := s.Engine.Store.GetDecision(r.Context(), r.PathValue("id"))
+	if err != nil || rec.Tenant != p.TenantID() {
+		api.WriteError(w, api.FormatOpenAI, api.NewError(api.CodeNotFound, "no decision record for that request"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(rec.Body)
+}

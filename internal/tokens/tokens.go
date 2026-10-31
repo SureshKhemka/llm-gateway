@@ -4,7 +4,6 @@
 package tokens
 
 import (
-	"strings"
 	"unicode/utf8"
 
 	"github.com/SureshKhemka/llm-gateway/internal/api"
@@ -16,11 +15,25 @@ func Count(s string) int {
 		return 0
 	}
 	byChars := (utf8.RuneCountInString(s) + 3) / 4
-	byWords := (len(strings.Fields(s))*4 + 2) / 3
+	byWords := (words(s)*4 + 2) / 3
 	if byWords > byChars {
 		return byWords
 	}
 	return byChars
+}
+
+// words counts whitespace-separated words without allocating.
+func words(s string) int {
+	n, in := 0, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		space := c == ' ' || c == '\n' || c == '\t' || c == '\r'
+		if !space && !in {
+			n++
+		}
+		in = !space
+	}
+	return n
 }
 
 const perMessageOverhead = 4

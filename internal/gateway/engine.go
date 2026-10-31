@@ -19,14 +19,21 @@ import (
 	"github.com/SureshKhemka/llm-gateway/internal/tokens"
 )
 
+// EstimatorFunc is a pluggable difficulty estimator (similarity, classifier). It returns
+// ok=false to fall back to the rule-based estimator.
+type EstimatorFunc func(s *Snapshot, rc *RequestContext, req *api.ChatRequest, pol *config.Policy, dec *Decision) (Difficulty, bool)
+
 // Engine executes requests against the current snapshot.
 type Engine struct {
-	snap   atomic.Pointer[Snapshot]
-	Store  store.Store
-	Writer *store.Writer
-	Events observe.EventSink
-	Log    *slog.Logger
-	Now    func() time.Time
+	snap       atomic.Pointer[Snapshot]
+	Store      store.Store
+	Writer     *store.Writer
+	Events     observe.EventSink
+	Log        *slog.Logger
+	Now        func() time.Time
+	Latency    *LatencyTracker
+	Hooks      RouteHooks
+	Estimators map[string]EstimatorFunc
 }
 
 type EngineOptions struct {
@@ -51,7 +58,8 @@ func NewEngine(s *Snapshot, o EngineOptions) *Engine {
 		o.Events = observe.Multi{}
 	}
 	e := &Engine{Store: o.Store, Events: o.Events, Log: o.Log, Now: o.Now,
-		Writer: store.NewWriter(o.Store, o.WALDir, time.Second, o.Log)}
+		Writer:  store.NewWriter(o.Store, o.WALDir, time.Second, o.Log),
+		Latency: NewLatencyTracker(s.Config.Resilience.LatencyAlpha)}
 	e.snap.Store(s)
 	return e
 }
@@ -73,7 +81,8 @@ type Plan struct {
 	MaxOutput     int
 }
 
-// plan resolves the requested model. Explicit deployments are used as-is [API-07].
+// plan resolves the requested model: virtual models go through the router; concrete
+// deployments are used as-is [API-07].
 func (e *Engine) plan(s *Snapshot, rc *RequestContext, req *api.ChatRequest) (*Plan, error) {
 	p := &Plan{Requested: req.Model, PromptTokens: tokens.Prompt(req)}
 	p.MaxOutput = req.MaxOutput(s.Config.Defaults.MaxOutputTokens)
@@ -82,6 +91,12 @@ func (e *Engine) plan(s *Snapshot, rc *RequestContext, req *api.ChatRequest) (*P
 	}
 	if !rc.Principal.ModelAllowed(req.Model) {
 		return nil, api.NewError(api.CodeForbidden, "this key may not use model %q", req.Model)
+	}
+	if vm, ok := s.Catalog.VirtualModels[req.Model]; ok {
+		if err := e.route(s, rc, req, vm, p); err != nil {
+			return p, err
+		}
+		return p, nil
 	}
 	d := s.Catalog.Lookup(req.Model)
 	if d == nil || !d.Approved {
@@ -93,12 +108,33 @@ func (e *Engine) plan(s *Snapshot, rc *RequestContext, req *api.ChatRequest) (*P
 	if !rc.Principal.ProviderAllowed(d.Provider) {
 		return nil, api.NewError(api.CodeForbidden, "this key may not use provider %q", d.Provider)
 	}
-	if p.PromptTokens+p.MaxOutput > d.ContextWindow && p.PromptTokens > d.ContextWindow {
+	if p.PromptTokens > d.ContextWindow {
 		return nil, api.NewError(api.CodeContextTooLong, "prompt of ~%d tokens exceeds %s's context window of %d", p.PromptTokens, d.ID, d.ContextWindow)
 	}
+	pol, src := resolvePolicy(s, rc, nil)
+	p.Policy, p.PolicyName, p.PolicyVersion = pol, pol.Name, pol.Version
+	estCost, estLat := e.estimate(d, rc.Start, p.PromptTokens, min(p.MaxOutput, pol.ExpectedOutput))
 	p.Attempts = []*catalog.Deployment{d}
 	p.Reason = "explicit_model"
+	p.Decision = &Decision{RequestID: rc.ID, RequestedModel: req.Model, Policy: pol.Name, PolicyVersion: pol.Version,
+		PolicySource: src, Objective: "explicit", PromptTokens: p.PromptTokens, MaxOutputTokens: p.MaxOutput,
+		MinTier: d.Tier, MaxTier: d.Tier, Reason: "explicit_model", Ordered: []string{d.ID}, EstCostUSD: estCost,
+		Candidates: []CandidateInfo{{Deployment: d.ID, Provider: d.Provider, Tier: d.Tier, EstCostUSD: estCost, EstLatencyMs: estLat}}}
 	return p, nil
+}
+
+// Explain plans a request without calling any model and at no cost [RTE-15].
+func (e *Engine) Explain(rc *RequestContext, req *api.ChatRequest) (*Decision, error) {
+	s := e.Snapshot()
+	rc.Explain = true
+	p, err := e.plan(s, rc, req)
+	if p != nil && p.Decision != nil {
+		if len(p.Decision.Ordered) > 0 {
+			p.Decision.Chosen = p.Decision.Ordered[0]
+		}
+		return p.Decision, err
+	}
+	return nil, err
 }
 
 func (e *Engine) timeouts(s *Snapshot, rc *RequestContext, d *catalog.Deployment) catalog.Timeouts {
@@ -164,7 +200,7 @@ func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequ
 	meta := e.newMeta(rc, req.Model)
 	p, err := e.plan(s, rc, req)
 	if err != nil {
-		return nil, e.fail(s, rc, meta, err), err
+		return nil, e.failPlan(s, rc, meta, p, err), err
 	}
 	applyPlan(meta, p)
 	var lastErr error
@@ -187,6 +223,7 @@ func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequ
 		}
 		text, calls := responseText(resp)
 		u := usageFrom(req, resp.Usage, text, calls)
+		e.Latency.Observe(d.ID, elapsed, 0, 0)
 		bd := cost.Of(d, rc.Start, u)
 		meta.Attempts = append(meta.Attempts, observe.Attempt{Deployment: d.ID, Provider: d.Provider, Kind: kind, Status: "ok", CostUSD: bd.Total(), LatencyMs: elapsed})
 		meta.Deployment, meta.Provider = d.ID, d.Provider
@@ -198,7 +235,7 @@ func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequ
 		return resp, meta, nil
 	}
 	gerr := upstreamToAPI(lastErr)
-	return nil, e.fail(s, rc, meta, gerr), gerr
+	return nil, e.failPlan(s, rc, meta, p, gerr), gerr
 }
 
 // upstreamToAPI maps the final upstream failure to a client error.
@@ -234,6 +271,15 @@ func msSince(now func() time.Time, t time.Time) float64 {
 
 // fail records a failed request and returns the meta to attach to the error response.
 func (e *Engine) fail(s *Snapshot, rc *RequestContext, meta *Meta, err error) *Meta {
+	return e.failPlan(s, rc, meta, nil, err)
+}
+
+// failPlan is fail with the (possibly partial) plan, so the decision record — including
+// exclusion reasons — is stored for failed routes too [RTE-02, RTE-14].
+func (e *Engine) failPlan(s *Snapshot, rc *RequestContext, meta *Meta, p *Plan, err error) *Meta {
+	if p != nil && p.Decision != nil {
+		applyPlan(meta, p)
+	}
 	var ge *api.Error
 	if !errors.As(err, &ge) {
 		ge = api.NewError(api.CodeInternal, "%v", err)
@@ -243,7 +289,7 @@ func (e *Engine) fail(s *Snapshot, rc *RequestContext, meta *Meta, err error) *M
 		status = api.StatusFor(ge.Code)
 	}
 	meta.ErrorCode = ge.Code
-	e.finish(s, rc, meta, nil, status, ge.Code)
+	e.finish(s, rc, meta, p, status, ge.Code)
 	return meta
 }
 
@@ -442,7 +488,7 @@ func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.Ch
 	meta := e.newMeta(rc, req.Model)
 	p, err := e.plan(s, rc, req)
 	if err != nil {
-		e.fail(s, rc, meta, err)
+		e.failPlan(s, rc, meta, p, err)
 		return &ChatStream{Meta: meta}, err
 	}
 	applyPlan(meta, p)
@@ -468,7 +514,7 @@ func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.Ch
 		return cs, nil
 	}
 	gerr := upstreamToAPI(lastErr)
-	e.fail(s, rc, meta, gerr)
+	e.failPlan(s, rc, meta, p, gerr)
 	return &ChatStream{Meta: meta}, gerr
 }
 
@@ -531,6 +577,9 @@ func (cs *ChatStream) Close(clientErr error) *Meta {
 	m.Cost = cost.Of(cs.dep, cs.rc.Start, m.Usage)
 	m.CostUSD = m.Cost.Total()
 	m.UpstreamMs = msSince(cs.e.Now, cs.start)
+	if clientErr == nil && cs.FailErr == nil {
+		cs.e.Latency.Observe(cs.dep.ID, m.TTFTMs, m.Usage.TotalOutput(), m.UpstreamMs-m.TTFTMs)
+	}
 	last := &m.Attempts[len(m.Attempts)-1]
 	last.CostUSD, last.LatencyMs, last.TTFTMs = m.CostUSD, m.UpstreamMs, m.TTFTMs
 	status, code := 200, ""

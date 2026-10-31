@@ -48,6 +48,8 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("POST /v1/chat/completions", s.track(s.handleChat))
 	s.Mux.HandleFunc("POST /v1/embeddings", s.track(s.handleEmbeddings))
 	s.Mux.HandleFunc("GET /v1/models", s.handleModels)
+	s.Mux.HandleFunc("POST /v1/route/explain", s.handleExplain)
+	s.Mux.HandleFunc("GET /v1/route/decisions/{id}", s.handleDecision)
 	s.Mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	s.Mux.HandleFunc("GET /readyz", s.handleReady)
 }

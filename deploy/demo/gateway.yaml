@@ -22,6 +22,18 @@ defaults:
   policy: default
   baseline: sima/qwen-27b
 
+policies:
+  - name: default
+    objective: min_cost
+    description: cheapest deployment meeting the request's difficulty tier
+  - name: baseline-strongest
+    objective: max_quality
+    description: always the strongest eligible deployment (the savings baseline)
+
+virtual_models:
+  - name: baseline
+    policy: baseline-strongest
+
 deployments:
   - id: sima/gemma-e2b
     provider: sima

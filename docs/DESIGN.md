@@ -162,8 +162,11 @@ rate limits fail open [NFR-08].
 
 ## 7. Routing algorithm [RTE-01..17]
 
-Policy resolution: request hint (narrowing only) → key → project → tenant → virtual model →
-global default [RTE-09]. A policy is `{name, version, objective, difficulty: {estimator,
+Policy resolution [RTE-09]: for the generic virtual model `auto`, key → project → tenant →
+global default. A specific virtual model (`auto-fast`, `auto-cheap`, operator-defined)
+selects its own policy — that is what asking for it means — while key/tenant hard limits
+(max cost, providers, allow-lists, residency) still apply as constraints. Request hints
+then narrow the result and never widen it (§6, RTE-10). A policy is `{name, version, objective, difficulty: {estimator,
 thresholds}, max_cost_usd, latency_target_ms, min_tier, allowed/denied providers,
 residency, cascade: {enabled, max_escalations, validators, judge}, degrade: [{at_pct, max_tier}],
 cache: {semantic_threshold, allow_tools}, split: [...], shadow: {...}}`.
@@ -178,7 +181,9 @@ cache: {semantic_threshold, allow_tools}, split: [...], shadow: {...}}`.
 2. **Difficulty** score in [0,1] and minimum tier [RTE-03]:
    - `rules` (default): weighted signals — prompt length, code fences/keywords, tools present,
      reasoning cues ("step by step", "prove", "debug", "why"), conversation depth, JSON
-     schema, explicit `min_tier` hint. Score → tier via policy thresholds (default 0.2/0.45/0.7).
+     schema, arithmetic word problems, explicit `min_tier` hint. Score → tier via policy
+     thresholds (default 0.2/0.45/0.7). Regexes scan the first and last 4 KB of very long
+     prompts (length is measured on the whole prompt).
    - `similarity`: k-NN over embedded labelled examples [RTE-04].
    - `classifier`: a tier-0 model prompted to output a tier digit; its cost and latency are
      charged to the request [RTE-16].
@@ -186,7 +191,13 @@ cache: {semantic_threshold, allow_tools}, split: [...], shadow: {...}}`.
    discount when the provider reports prompt caching, RTE-17) + expected output × output
    price; estimated latency = observed TTFT EWMA + expected output / observed TPS
    (falling back to the static profile) [RTE-07].
-   - `min_cost` (default): filter tier ≥ min tier and est. latency ≤ target, sort by cost.
+   - Hard constraints (capabilities, context, allow-lists, residency, policy/hint tier
+     bounds, max cost) exclude. The **difficulty-derived** tier is a preference: candidates
+     below it stay at the end of the attempt list so a request is served rather than failed
+     when nothing at its tier is available (reason `below_difficulty_tier`). A latency target
+     excludes slow candidates unless that would leave none.
+   - `min_cost` (default): among candidates at or above the difficulty tier, sort by
+     estimated cost (ties: higher tier, then lower latency).
    - `min_latency`: filter cost ≤ max, sort by latency. `max_quality`: sort by tier desc, cost.
    - `weighted`: minimise `w_c·cost_norm + w_l·latency_norm − w_q·tier_norm`.
 4. **Budget degradation** [RTE-08]: utilisation of the tightest applicable budget ≥ a
