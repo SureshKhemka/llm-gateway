@@ -1,5 +1,5 @@
-// Package app assembles the gateway process: configuration, snapshot, engine, HTTP
-// listeners, discovery, reload and graceful shutdown.
+// Package app assembles the gateway process: configuration, storage, snapshot, engine,
+// HTTP listeners, discovery, probes, reload and graceful shutdown.
 package app
 
 import (
@@ -9,11 +9,16 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
+	"github.com/SureshKhemka/llm-gateway/internal/admin"
 	"github.com/SureshKhemka/llm-gateway/internal/config"
 	"github.com/SureshKhemka/llm-gateway/internal/gateway"
+	"github.com/SureshKhemka/llm-gateway/internal/governance"
 	"github.com/SureshKhemka/llm-gateway/internal/observe"
 	"github.com/SureshKhemka/llm-gateway/internal/server"
 	"github.com/SureshKhemka/llm-gateway/internal/store"
@@ -23,22 +28,41 @@ type Options struct {
 	ConfigPath string
 	Log        *slog.Logger
 	Store      store.Store
+	Counters   governance.Counters
 	Factory    gateway.ProviderFactory
 }
 
 type App struct {
-	opts      Options
-	log       *slog.Logger
-	Engine    *gateway.Engine
-	Server    *server.Server
-	Discovery *gateway.Discovery
-	Store     store.Store
+	opts   Options
+	log    *slog.Logger
+	Engine *gateway.Engine
+	Server *server.Server
+	Admin  *admin.API
+	Store  store.Store
+	redis  redis.UniversalClient
 
 	mu       sync.Mutex
 	fileStat map[string]time.Time
+	fileCfg  *config.Config
 }
 
 func LoadConfig(path string) (*config.Config, error) { return config.Load(path) }
+
+// optionalSecret resolves a storage reference; an unset environment variable means
+// "not configured" (single-node development mode).
+func optionalSecret(ref config.SecretRef) (string, bool, error) {
+	if ref.IsZero() {
+		return "", false, nil
+	}
+	v, err := ref.Resolve()
+	if err != nil {
+		if strings.HasPrefix(string(ref), "env:") && strings.Contains(err.Error(), "is not set") {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return v, v != "", nil
+}
 
 func New(ctx context.Context, o Options) (*App, error) {
 	if o.Log == nil {
@@ -48,11 +72,46 @@ func New(ctx context.Context, o Options) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{opts: o, log: o.Log, Discovery: gateway.NewDiscovery(), fileStat: map[string]time.Time{}}
+	a := &App{opts: o, log: o.Log, fileStat: map[string]time.Time{}, fileCfg: cfg}
+
 	a.Store = o.Store
 	if a.Store == nil {
-		a.Store = store.NewMemory()
+		dsn, ok, err := optionalSecret(cfg.Storage.PostgresDSN)
+		if err != nil {
+			return nil, fmt.Errorf("storage.postgres_dsn: %w", err)
+		}
+		if ok {
+			pg, err := store.OpenPostgres(ctx, dsn)
+			if err != nil {
+				return nil, fmt.Errorf("postgres: %w", err)
+			}
+			a.Store = pg
+			o.Log.Info("using postgres store")
+		} else {
+			a.Store = store.NewMemory()
+			o.Log.Warn("storage.postgres_dsn not set: records are kept in memory (single-node development mode)")
+		}
 	}
+	counters := o.Counters
+	if counters == nil {
+		url, ok, err := optionalSecret(cfg.Storage.RedisURL)
+		if err != nil {
+			return nil, fmt.Errorf("storage.redis_url: %w", err)
+		}
+		if ok {
+			opt, err := redis.ParseURL(url)
+			if err != nil {
+				return nil, fmt.Errorf("storage.redis_url: %w", err)
+			}
+			a.redis = redis.NewClient(opt)
+			counters = governance.NewRedisCounters(a.redis, "gw:")
+			o.Log.Info("using redis for budgets, rate limits and cache")
+		} else {
+			counters = governance.NewMemCounters()
+			o.Log.Warn("storage.redis_url not set: budgets and limits are per instance (single-node development mode)")
+		}
+	}
+
 	snap, err := gateway.BuildSnapshot(gateway.BuildInput{Config: cfg, Factory: o.Factory})
 	if err != nil {
 		return nil, err
@@ -61,9 +120,19 @@ func New(ctx context.Context, o Options) (*App, error) {
 	if cfg.Observability.LogRequests == nil || *cfg.Observability.LogRequests {
 		sinks = append(sinks, observe.NewJSONLogger(os.Stdout))
 	}
-	a.Engine = gateway.NewEngine(snap, gateway.EngineOptions{Store: a.Store, Events: sinks, Log: o.Log, WALDir: cfg.Storage.WALDir})
+	a.Engine = gateway.NewEngine(snap, gateway.EngineOptions{Store: a.Store, Events: sinks, Log: o.Log,
+		WALDir: cfg.Storage.WALDir, Counters: counters, Factory: o.Factory})
+	a.Engine.Gov.WatchRevocations(ctx)
+	if err := a.Engine.Rebuild(ctx, cfg, "startup"); err != nil {
+		return nil, err
+	}
 	a.Server = server.New(a.Engine, o.Log)
 	a.Server.Ready = a.ready
+	a.Admin = admin.New(a.Engine)
+	a.Admin.Reload = a.Reload
+	if cfg.Server.AdminListen == "" {
+		a.Admin.Mount(a.Server.Mux)
+	}
 	a.recordFileStats(cfg.Files)
 	a.discover(ctx)
 	return a, nil
@@ -86,47 +155,36 @@ func (a *App) ready() (bool, string) {
 
 // discover lists models and rebuilds the snapshot if anything new appeared.
 func (a *App) discover(ctx context.Context) {
-	s := a.Engine.Snapshot()
-	before := len(a.Discovery.List())
-	found := a.Discovery.Run(ctx, s)
-	if len(found) == before && before > 0 {
+	before := len(a.Engine.Discovery.List())
+	found := a.Engine.Discovery.Run(ctx, a.Engine.Snapshot())
+	if len(found) == before {
 		return
 	}
-	if err := a.rebuild(s.Config, "discovery"); err != nil {
+	if err := a.Engine.Rebuild(ctx, nil, "discovery"); err != nil {
 		a.log.Warn("snapshot rebuild after discovery failed", "err", err)
 	}
 }
 
-func (a *App) rebuild(cfg *config.Config, reason string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	prev := a.Engine.Snapshot()
-	keys, _ := a.Store.ListKeys(context.Background(), "")
-	pols, _ := a.Store.ListPolicyVersions(context.Background(), "")
-	snap, err := gateway.BuildSnapshot(gateway.BuildInput{
-		Config: cfg, APIKeys: keys, PolicyVers: pols, Discovered: a.Discovery.List(),
-		Factory: a.opts.Factory, PrevVersion: prev.Version, Reuse: prev.Providers,
-	})
-	if err != nil {
-		return err
-	}
-	a.Engine.Swap(snap)
-	a.log.Info("snapshot swapped", "version", snap.Version, "reason", reason, "deployments", len(snap.Catalog.Deployments))
-	return nil
-}
-
-// Reload re-reads configuration; an invalid file leaves the running state untouched
-// [CFG-02, CFG-03].
+// Reload re-reads configuration files; an invalid file leaves the running state
+// untouched [CFG-02, CFG-03].
 func (a *App) Reload(ctx context.Context, reason string) error {
 	cfg, err := config.Load(a.opts.ConfigPath)
 	if err != nil {
 		return err
 	}
+	if err := a.Engine.Rebuild(ctx, cfg, reason); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.fileCfg = cfg
+	a.mu.Unlock()
 	a.recordFileStats(cfg.Files)
-	return a.rebuild(cfg, reason)
+	return nil
 }
 
 func (a *App) recordFileStats(files []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	for _, f := range files {
 		if st, err := os.Stat(f); err == nil {
 			a.fileStat[f] = st.ModTime()
@@ -135,6 +193,8 @@ func (a *App) recordFileStats(files []string) {
 }
 
 func (a *App) filesChanged() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	for f, mt := range a.fileStat {
 		if st, err := os.Stat(f); err != nil || !st.ModTime().Equal(mt) {
 			return true
@@ -143,13 +203,17 @@ func (a *App) filesChanged() bool {
 	return false
 }
 
-// background runs the config poller and periodic discovery.
+// background polls config files, refreshes admin-API state written by other instances
+// (keys, budgets: applied within seconds, BUD-06), discovers models and rolls up old
+// cost records.
 func (a *App) background(ctx context.Context) {
 	cfg := a.Engine.Snapshot().Config
 	poll := time.NewTicker(cfg.Server.ReloadEvery.D())
 	disc := time.NewTicker(30 * time.Second)
+	rollup := time.NewTicker(6 * time.Hour)
 	defer poll.Stop()
 	defer disc.Stop()
+	defer rollup.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -160,9 +224,19 @@ func (a *App) background(ctx context.Context) {
 					a.log.Error("reload rejected; keeping running configuration", "err", err)
 					a.recordFileStats(a.Engine.Snapshot().Config.Files)
 				}
+			} else if err := a.Engine.Rebuild(ctx, nil, "refresh"); err != nil {
+				a.log.Warn("refresh failed", "err", err)
 			}
 		case <-disc.C:
 			a.discover(ctx)
+		case <-rollup.C:
+			if pg, ok := a.Store.(*store.Postgres); ok {
+				if n, err := pg.Rollup(ctx, 395*24*time.Hour); err != nil {
+					a.log.Error("cost rollup failed", "err", err)
+				} else if n > 0 {
+					a.log.Info("rolled up old cost records", "rows", n)
+				}
+			}
 		}
 	}
 }
@@ -173,15 +247,24 @@ func (a *App) Serve(ctx context.Context) error {
 	go a.background(ctx)
 	go a.Engine.RunProbes(ctx, 15*time.Second)
 	srv := &http.Server{Addr: cfg.Server.Listen, Handler: a.Server.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	errc := make(chan error, 1)
-	go func() {
-		a.log.Info("listening", "addr", cfg.Server.Listen)
+	errc := make(chan error, 2)
+	serve := func(s *http.Server) {
+		a.log.Info("listening", "addr", s.Addr)
 		if cfg.Server.TLSCertFile != "" {
-			errc <- srv.ListenAndServeTLS(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+			errc <- s.ListenAndServeTLS(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
 		} else {
-			errc <- srv.ListenAndServe()
+			errc <- s.ListenAndServe()
 		}
-	}()
+	}
+	go serve(srv)
+	var adminSrv *http.Server
+	if cfg.Server.AdminListen != "" {
+		// A separate listener keeps the admin API off the client-facing port [NFR-11].
+		mux := http.NewServeMux()
+		a.Admin.Mount(mux)
+		adminSrv = &http.Server{Addr: cfg.Server.AdminListen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		go serve(adminSrv)
+	}
 	select {
 	case err := <-errc:
 		return err
@@ -194,7 +277,13 @@ func (a *App) Serve(ctx context.Context) error {
 		a.log.Warn("drain timed out", "in_flight", a.Server.InFlight())
 	}
 	_ = srv.Shutdown(dctx)
+	if adminSrv != nil {
+		_ = adminSrv.Shutdown(dctx)
+	}
 	a.Engine.Close()
+	if a.redis != nil {
+		a.redis.Close()
+	}
 	if err := a.Store.Close(); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("store close: %w", err)
 	}

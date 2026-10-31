@@ -204,22 +204,25 @@ func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm
 	dec.Difficulty, dec.DifficultySignals, dec.Estimator = diff.Score, diff.Signals, pol.Difficulty.Estimator
 	floor := max(diff.Tier, c.minTier)
 
-	// Budget-driven degradation [RTE-08].
+	// Budget-driven degradation [RTE-08]: above a threshold the tier is capped. The cap
+	// is a strong preference, not a hard constraint — a request only a pricier
+	// deployment can serve (vision, long context) is still served.
+	degradeCap := c.maxTier
 	if e.Hooks.BudgetUtilisation != nil && len(pol.Degrade) > 0 {
 		util := e.Hooks.BudgetUtilisation(rc)
 		steps := append([]config.DegradeStep(nil), pol.Degrade...)
 		sort.Slice(steps, func(i, j int) bool { return steps[i].AtPct < steps[j].AtPct })
 		for _, st := range steps {
-			if util >= st.AtPct && st.MaxTier < c.maxTier {
-				c.maxTier = st.MaxTier
-				dec.Degraded = fmt.Sprintf("budget %.0f%% ≥ %.0f%%: max tier %d", util, st.AtPct, st.MaxTier)
+			if util >= st.AtPct && st.MaxTier < degradeCap {
+				degradeCap = st.MaxTier
+				dec.Degraded = fmt.Sprintf("budget %.0f%% ≥ %.0f%%: tier capped at %d", util, st.AtPct, st.MaxTier)
 			}
 		}
-		if dec.Degraded != "" && floor > c.maxTier {
-			floor = max(c.minTier, c.maxTier)
+		if dec.Degraded != "" && floor > degradeCap {
+			floor = max(c.minTier, degradeCap)
 		}
 	}
-	dec.MinTier, dec.MaxTier = floor, c.maxTier
+	dec.MinTier, dec.MaxTier = floor, degradeCap
 
 	outTokens := pol.ExpectedOutput
 	explicitMax := req.MaxOutput(0)
@@ -240,7 +243,7 @@ func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm
 		}
 	}
 
-	var meeting, below []ranked
+	var meeting, below, overCap []ranked
 	for _, d := range pool {
 		var reasons []string
 		if !d.Enabled {
@@ -307,13 +310,15 @@ func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm
 			continue
 		}
 		r := ranked{d: d, info: CandidateInfo{Deployment: d.ID, Provider: d.Provider, Tier: d.Tier, EstCostUSD: estCost, EstLatencyMs: estLat, Health: health}}
-		if d.Tier >= floor {
+		if d.Tier > degradeCap {
+			overCap = append(overCap, r)
+		} else if d.Tier >= floor {
 			meeting = append(meeting, r)
 		} else {
 			below = append(below, r)
 		}
 	}
-	if len(meeting)+len(below) == 0 {
+	if len(meeting)+len(below)+len(overCap) == 0 {
 		err := api.NewError(api.CodeNoEligibleModel, "no deployment satisfies the request's constraints")
 		err.Details = dec.Exclusions
 		return err
@@ -372,12 +377,13 @@ func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm
 		}
 		return below[i].info.EstCostUSD < below[j].info.EstCostUSD
 	})
-	all := append(meeting, below...)
+	sort.SliceStable(overCap, func(i, j int) bool { return overCap[i].info.EstCostUSD < overCap[j].info.EstCostUSD })
+	all := append(append(meeting, below...), overCap...)
 	all = e.balancePools(all)
 
 	reason := map[string]string{"min_cost": "cheapest_meeting_tier", "min_latency": "fastest_within_cost",
 		"max_quality": "highest_tier_within_cost", "weighted": "best_weighted_score"}[pol.Objective]
-	if len(meeting) == 0 {
+	if len(meeting) == 0 && len(below) > 0 {
 		reason = "below_difficulty_tier"
 	}
 	if dec.Degraded != "" {

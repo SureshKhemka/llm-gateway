@@ -35,7 +35,26 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 }
 
 func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(), nil }
-func (d Duration) D() time.Duration          { return time.Duration(d) }
+
+// MarshalJSON / UnmarshalJSON use the same "30s" form as YAML (the admin API).
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + time.Duration(d).String() + `"`), nil
+}
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(string(b), `"`)
+	if s == "" || s == "null" {
+		*d = 0
+		return nil
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q", s)
+	}
+	*d = Duration(v)
+	return nil
+}
+func (d Duration) D() time.Duration { return time.Duration(d) }
 
 // SecretRef is a reference to a secret, never the secret itself [CFG-04, PRV-08]:
 // "env:NAME" reads an environment variable, "file:/path" reads a mounted secret file
@@ -75,27 +94,35 @@ func (s SecretRef) valid() bool {
 func (s SecretRef) String() string { return string(s) }
 
 type Config struct {
-	Server        Server          `yaml:"server"`
-	Storage       Storage         `yaml:"storage"`
-	Providers     []Provider      `yaml:"providers"`
-	Deployments   []Deployment    `yaml:"deployments"`
-	VirtualModels []VirtualModel  `yaml:"virtual_models"`
-	Policies      []Policy        `yaml:"policies"`
-	Tenants       []Tenant        `yaml:"tenants"`
-	Admins        []AdminCred     `yaml:"admins"`
-	Budgets       []Budget        `yaml:"budgets"`
-	Alerts        []AlertSink     `yaml:"alerts"`
-	Cache         Cache           `yaml:"cache"`
-	Guardrails    Guardrails      `yaml:"guardrails"`
-	Resilience    Resilience      `yaml:"resilience"`
-	Observability Observability   `yaml:"observability"`
-	Defaults      RoutingDefaults `yaml:"defaults"`
-	Evals         Evals           `yaml:"evals"`
+	Server        Server          `yaml:"server" json:"server,omitempty"`
+	Storage       Storage         `yaml:"storage" json:"storage,omitempty"`
+	Providers     []Provider      `yaml:"providers" json:"providers,omitempty"`
+	Deployments   []Deployment    `yaml:"deployments" json:"deployments,omitempty"`
+	VirtualModels []VirtualModel  `yaml:"virtual_models" json:"virtual_models,omitempty"`
+	Policies      []Policy        `yaml:"policies" json:"policies,omitempty"`
+	Tenants       []Tenant        `yaml:"tenants" json:"tenants,omitempty"`
+	Admins        []AdminCred     `yaml:"admins" json:"admins,omitempty"`
+	Budgets       []Budget        `yaml:"budgets" json:"budgets,omitempty"`
+	Alerts        []AlertSink     `yaml:"alerts" json:"alerts,omitempty"`
+	Cache         Cache           `yaml:"cache" json:"cache,omitempty"`
+	Guardrails    Guardrails      `yaml:"guardrails" json:"guardrails,omitempty"`
+	Resilience    Resilience      `yaml:"resilience" json:"resilience,omitempty"`
+	Observability Observability   `yaml:"observability" json:"observability,omitempty"`
+	Defaults      RoutingDefaults `yaml:"defaults" json:"defaults,omitempty"`
+	Evals         Evals           `yaml:"evals" json:"evals,omitempty"`
 
 	// Files lists the files this config was loaded from (for messages).
-	Files []string `yaml:"-"`
+	Files []string `yaml:"-" json:"-"`
 	// origin maps "kind/id" to the file that defined it.
 	origin map[string]string
+}
+
+// CopyOrigins copies file-origin bookkeeping from another config (after cloning).
+func (c *Config) CopyOrigins(from *Config) {
+	c.origin = map[string]string{}
+	for k, v := range from.origin {
+		c.origin[k] = v
+	}
 }
 
 // FileOf returns the file that defined the object kind/id (or the first file).
@@ -110,329 +137,331 @@ func (c *Config) FileOf(kind, id string) string {
 }
 
 type Server struct {
-	Listen        string   `yaml:"listen"`
-	AdminListen   string   `yaml:"admin_listen"` // empty: admin API on the main listener
-	DrainTimeout  Duration `yaml:"drain_timeout"`
-	MaxBodyBytes  int64    `yaml:"max_body_bytes"`
-	MaxInFlight   int      `yaml:"max_in_flight"` // load shedding threshold [RES-09]
-	ReloadEvery   Duration `yaml:"reload_every"`  // config file poll interval
-	TLSCertFile   string   `yaml:"tls_cert_file"`
-	TLSKeyFile    string   `yaml:"tls_key_file"`
-	InstanceID    string   `yaml:"instance_id"`
-	TrustProxyIPs []string `yaml:"trust_proxy_ips"`
+	Listen        string   `yaml:"listen" json:"listen,omitempty"`
+	AdminListen   string   `yaml:"admin_listen" json:"admin_listen,omitempty"` // empty: admin API on the main listener
+	DrainTimeout  Duration `yaml:"drain_timeout" json:"drain_timeout,omitempty"`
+	MaxBodyBytes  int64    `yaml:"max_body_bytes" json:"max_body_bytes,omitempty"`
+	MaxInFlight   int      `yaml:"max_in_flight" json:"max_in_flight,omitempty"` // load shedding threshold [RES-09]
+	ReloadEvery   Duration `yaml:"reload_every" json:"reload_every,omitempty"`   // config file poll interval
+	TLSCertFile   string   `yaml:"tls_cert_file" json:"tls_cert_file,omitempty"`
+	TLSKeyFile    string   `yaml:"tls_key_file" json:"tls_key_file,omitempty"`
+	InstanceID    string   `yaml:"instance_id" json:"instance_id,omitempty"`
+	TrustProxyIPs []string `yaml:"trust_proxy_ips" json:"trust_proxy_ips,omitempty"`
 }
 
 type Storage struct {
-	RedisURL    SecretRef `yaml:"redis_url"`
-	PostgresDSN SecretRef `yaml:"postgres_dsn"`
+	RedisURL    SecretRef `yaml:"redis_url" json:"redis_url,omitempty"`
+	PostgresDSN SecretRef `yaml:"postgres_dsn" json:"postgres_dsn,omitempty"`
 	// BudgetsFailOpen lets requests through when Redis is unreachable (default: fail closed) [NFR-08].
-	BudgetsFailOpen bool   `yaml:"budgets_fail_open"`
-	WALDir          string `yaml:"wal_dir"`
+	BudgetsFailOpen bool   `yaml:"budgets_fail_open" json:"budgets_fail_open,omitempty"`
+	WALDir          string `yaml:"wal_dir" json:"wal_dir,omitempty"`
 }
 
 type Provider struct {
-	ID       string            `yaml:"id"`
-	Type     string            `yaml:"type"` // openai | anthropic
-	BaseURL  string            `yaml:"base_url"`
-	APIKey   SecretRef         `yaml:"api_key"`
-	Headers  map[string]string `yaml:"headers"`
-	Discover bool              `yaml:"discover"` // list models via /v1/models [PRV-06]
+	ID       string            `yaml:"id" json:"id,omitempty"`
+	Type     string            `yaml:"type" json:"type,omitempty"` // openai | anthropic
+	BaseURL  string            `yaml:"base_url" json:"base_url,omitempty"`
+	APIKey   SecretRef         `yaml:"api_key" json:"api_key,omitempty"`
+	Headers  map[string]string `yaml:"headers" json:"headers,omitempty"`
+	Discover bool              `yaml:"discover" json:"discover,omitempty"` // list models via /v1/models [PRV-06]
 	// AutoApprove makes discovered models usable immediately with default metadata.
-	AutoApprove bool `yaml:"auto_approve"`
+	AutoApprove bool `yaml:"auto_approve" json:"auto_approve,omitempty"`
 	// AllowPrivateNetwork permits base URLs in private ranges (SSRF guard) [NFR-14].
-	AllowPrivateNetwork *bool    `yaml:"allow_private_network"`
-	Timeouts            Timeouts `yaml:"timeouts"`
-	Enabled             *bool    `yaml:"enabled"`
+	AllowPrivateNetwork *bool    `yaml:"allow_private_network" json:"allow_private_network,omitempty"`
+	Timeouts            Timeouts `yaml:"timeouts" json:"timeouts,omitempty"`
+	Enabled             *bool    `yaml:"enabled" json:"enabled,omitempty"`
 	// ProbeModel is used for active health probes; empty uses the model list.
-	ProbeEvery Duration `yaml:"probe_every"`
+	ProbeEvery Duration `yaml:"probe_every" json:"probe_every,omitempty"`
 	// DefaultDiscovered holds metadata applied to auto-approved discovered models.
-	DefaultDiscovered *Deployment `yaml:"discovered_defaults"`
+	DefaultDiscovered *Deployment `yaml:"discovered_defaults" json:"discovered_defaults,omitempty"`
 }
 
 type Timeouts struct {
-	Connect Duration `yaml:"connect"`
-	TTFT    Duration `yaml:"ttft"`
-	Idle    Duration `yaml:"idle"`
-	Total   Duration `yaml:"total"`
+	Connect Duration `yaml:"connect" json:"connect,omitempty"`
+	TTFT    Duration `yaml:"ttft" json:"ttft,omitempty"`
+	Idle    Duration `yaml:"idle" json:"idle,omitempty"`
+	Total   Duration `yaml:"total" json:"total,omitempty"`
 }
 
 type PriceCard struct {
-	EffectiveFrom time.Time `yaml:"effective_from"`
-	Input         float64   `yaml:"input"` // USD per 1M tokens
-	CachedInput   *float64  `yaml:"cached_input"`
-	Output        float64   `yaml:"output"`
-	Reasoning     *float64  `yaml:"reasoning"`
+	EffectiveFrom time.Time `yaml:"effective_from" json:"effective_from,omitempty"`
+	Input         float64   `yaml:"input" json:"input,omitempty"` // USD per 1M tokens
+	CachedInput   *float64  `yaml:"cached_input" json:"cached_input,omitempty"`
+	Output        float64   `yaml:"output" json:"output,omitempty"`
+	Reasoning     *float64  `yaml:"reasoning" json:"reasoning,omitempty"`
 }
 
 type Latency struct {
-	TTFTMs       float64 `yaml:"ttft_ms"`
-	TokensPerSec float64 `yaml:"tokens_per_sec"`
+	TTFTMs       float64 `yaml:"ttft_ms" json:"ttft_ms,omitempty"`
+	TokensPerSec float64 `yaml:"tokens_per_sec" json:"tokens_per_sec,omitempty"`
 }
 
 type Deployment struct {
-	ID              string      `yaml:"id"`
-	Provider        string      `yaml:"provider"`
-	Model           string      `yaml:"model"` // upstream model name
-	Capabilities    []string    `yaml:"capabilities"`
-	ContextWindow   int         `yaml:"context_window"`
-	MaxOutputTokens int         `yaml:"max_output_tokens"`
-	Tier            int         `yaml:"tier"`
-	Prices          []PriceCard `yaml:"prices"`
-	Latency         Latency     `yaml:"latency"`
-	Concurrency     int         `yaml:"concurrency"`
-	QueueWait       Duration    `yaml:"queue_wait"`
-	Residency       []string    `yaml:"residency"`
-	Enabled         *bool       `yaml:"enabled"`
-	Pool            string      `yaml:"pool"`
-	Weight          int         `yaml:"weight"`
-	Timeouts        Timeouts    `yaml:"timeouts"`
+	ID              string      `yaml:"id" json:"id,omitempty"`
+	Provider        string      `yaml:"provider" json:"provider,omitempty"`
+	Model           string      `yaml:"model" json:"model,omitempty"` // upstream model name
+	Capabilities    []string    `yaml:"capabilities" json:"capabilities,omitempty"`
+	ContextWindow   int         `yaml:"context_window" json:"context_window,omitempty"`
+	MaxOutputTokens int         `yaml:"max_output_tokens" json:"max_output_tokens,omitempty"`
+	Tier            int         `yaml:"tier" json:"tier,omitempty"`
+	Prices          []PriceCard `yaml:"prices" json:"prices,omitempty"`
+	Latency         Latency     `yaml:"latency" json:"latency,omitempty"`
+	Concurrency     int         `yaml:"concurrency" json:"concurrency,omitempty"`
+	QueueWait       Duration    `yaml:"queue_wait" json:"queue_wait,omitempty"`
+	Residency       []string    `yaml:"residency" json:"residency,omitempty"`
+	Enabled         *bool       `yaml:"enabled" json:"enabled,omitempty"`
+	Pool            string      `yaml:"pool" json:"pool,omitempty"`
+	Weight          int         `yaml:"weight" json:"weight,omitempty"`
+	Timeouts        Timeouts    `yaml:"timeouts" json:"timeouts,omitempty"`
 	// Warm reports whether a local model is loaded; nil means unknown (treated warm).
-	Warm *bool `yaml:"warm"`
+	Warm *bool `yaml:"warm" json:"warm,omitempty"`
 }
 
 type VirtualModel struct {
-	Name        string   `yaml:"name"`
-	Policy      string   `yaml:"policy"`
-	Deployments []string `yaml:"deployments"` // empty: every chat deployment
-	Description string   `yaml:"description"`
+	Name        string   `yaml:"name" json:"name,omitempty"`
+	Policy      string   `yaml:"policy" json:"policy,omitempty"`
+	Deployments []string `yaml:"deployments" json:"deployments,omitempty"` // empty: every chat deployment
+	Description string   `yaml:"description" json:"description,omitempty"`
 }
 
 type DifficultyCfg struct {
-	Estimator  string    `yaml:"estimator"`  // rules | similarity | classifier
-	Thresholds []float64 `yaml:"thresholds"` // score cut-offs for tiers 1..n
-	Classifier string    `yaml:"classifier"` // deployment for classifier estimator
-	Examples   string    `yaml:"examples"`   // JSONL file of labelled prompts (similarity)
-	Embedder   string    `yaml:"embedder"`   // embeddings deployment (similarity)
+	Estimator  string    `yaml:"estimator" json:"estimator,omitempty"`   // rules | similarity | classifier
+	Thresholds []float64 `yaml:"thresholds" json:"thresholds,omitempty"` // score cut-offs for tiers 1..n
+	Classifier string    `yaml:"classifier" json:"classifier,omitempty"` // deployment for classifier estimator
+	Examples   string    `yaml:"examples" json:"examples,omitempty"`     // JSONL file of labelled prompts (similarity)
+	Embedder   string    `yaml:"embedder" json:"embedder,omitempty"`     // embeddings deployment (similarity)
 }
 
 type CascadeCfg struct {
-	Enabled        bool     `yaml:"enabled"`
-	MaxEscalations int      `yaml:"max_escalations"`
-	Validators     []string `yaml:"validators"` // json_schema, non_empty, not_truncated, no_refusal, judge
-	Judge          string   `yaml:"judge"`      // deployment ID
-	JudgeMinScore  float64  `yaml:"judge_min_score"`
-	BufferStreams  bool     `yaml:"buffer_streams"`
+	Enabled        bool     `yaml:"enabled" json:"enabled,omitempty"`
+	MaxEscalations int      `yaml:"max_escalations" json:"max_escalations,omitempty"`
+	Validators     []string `yaml:"validators" json:"validators,omitempty"` // json_schema, non_empty, not_truncated, no_refusal, judge
+	Judge          string   `yaml:"judge" json:"judge,omitempty"`           // deployment ID
+	JudgeMinScore  float64  `yaml:"judge_min_score" json:"judge_min_score,omitempty"`
+	BufferStreams  bool     `yaml:"buffer_streams" json:"buffer_streams,omitempty"`
 }
 
 type DegradeStep struct {
-	AtPct   float64 `yaml:"at_pct"`
-	MaxTier int     `yaml:"max_tier"`
+	AtPct   float64 `yaml:"at_pct" json:"at_pct,omitempty"`
+	MaxTier int     `yaml:"max_tier" json:"max_tier,omitempty"`
 }
 
 type Split struct {
-	Policy string `yaml:"policy"`
-	Weight int    `yaml:"weight"`
+	Policy string `yaml:"policy" json:"policy,omitempty"`
+	Weight int    `yaml:"weight" json:"weight,omitempty"`
 }
 
 type Shadow struct {
-	Policy     string  `yaml:"policy"`
-	Deployment string  `yaml:"deployment"`
-	SampleRate float64 `yaml:"sample_rate"`
+	Policy     string  `yaml:"policy" json:"policy,omitempty"`
+	Deployment string  `yaml:"deployment" json:"deployment,omitempty"`
+	SampleRate float64 `yaml:"sample_rate" json:"sample_rate,omitempty"`
 }
 
 type PolicyCache struct {
-	SemanticThreshold *float64 `yaml:"semantic_threshold"`
-	AllowTools        bool     `yaml:"allow_tools"`
-	Disabled          bool     `yaml:"disabled"`
+	SemanticThreshold *float64 `yaml:"semantic_threshold" json:"semantic_threshold,omitempty"`
+	AllowTools        bool     `yaml:"allow_tools" json:"allow_tools,omitempty"`
+	Disabled          bool     `yaml:"disabled" json:"disabled,omitempty"`
 }
 
 type Weights struct {
-	Cost    float64 `yaml:"cost"`
-	Latency float64 `yaml:"latency"`
-	Quality float64 `yaml:"quality"`
+	Cost    float64 `yaml:"cost" json:"cost,omitempty"`
+	Latency float64 `yaml:"latency" json:"latency,omitempty"`
+	Quality float64 `yaml:"quality" json:"quality,omitempty"`
 }
 
 type Policy struct {
-	Name             string        `yaml:"name"`
-	Version          int           `yaml:"version"`
-	Objective        string        `yaml:"objective"` // min_cost | min_latency | max_quality | weighted
-	Weights          Weights       `yaml:"weights"`
-	Difficulty       DifficultyCfg `yaml:"difficulty"`
-	MinTier          *int          `yaml:"min_tier"`
-	MaxTier          *int          `yaml:"max_tier"`
-	MaxCostUSD       *float64      `yaml:"max_cost_usd"`
-	LatencyTargetMs  *float64      `yaml:"latency_target_ms"`
-	AllowedProviders []string      `yaml:"allowed_providers"`
-	DeniedProviders  []string      `yaml:"denied_providers"`
-	Residency        []string      `yaml:"residency"`
-	Cascade          CascadeCfg    `yaml:"cascade"`
-	Degrade          []DegradeStep `yaml:"degrade"`
-	Cache            PolicyCache   `yaml:"cache"`
-	Split            []Split       `yaml:"split"`
-	Shadow           *Shadow       `yaml:"shadow"`
-	MaxAttempts      int           `yaml:"max_attempts"`
-	ExpectedOutput   int           `yaml:"expected_output_tokens"`
-	Baseline         string        `yaml:"baseline"`
-	Description      string        `yaml:"description"`
+	Name             string        `yaml:"name" json:"name,omitempty"`
+	Version          int           `yaml:"version" json:"version,omitempty"`
+	Objective        string        `yaml:"objective" json:"objective,omitempty"` // min_cost | min_latency | max_quality | weighted
+	Weights          Weights       `yaml:"weights" json:"weights,omitempty"`
+	Difficulty       DifficultyCfg `yaml:"difficulty" json:"difficulty,omitempty"`
+	MinTier          *int          `yaml:"min_tier" json:"min_tier,omitempty"`
+	MaxTier          *int          `yaml:"max_tier" json:"max_tier,omitempty"`
+	MaxCostUSD       *float64      `yaml:"max_cost_usd" json:"max_cost_usd,omitempty"`
+	LatencyTargetMs  *float64      `yaml:"latency_target_ms" json:"latency_target_ms,omitempty"`
+	AllowedProviders []string      `yaml:"allowed_providers" json:"allowed_providers,omitempty"`
+	DeniedProviders  []string      `yaml:"denied_providers" json:"denied_providers,omitempty"`
+	Residency        []string      `yaml:"residency" json:"residency,omitempty"`
+	Cascade          CascadeCfg    `yaml:"cascade" json:"cascade,omitempty"`
+	Degrade          []DegradeStep `yaml:"degrade" json:"degrade,omitempty"`
+	Cache            PolicyCache   `yaml:"cache" json:"cache,omitempty"`
+	Split            []Split       `yaml:"split" json:"split,omitempty"`
+	Shadow           *Shadow       `yaml:"shadow" json:"shadow,omitempty"`
+	MaxAttempts      int           `yaml:"max_attempts" json:"max_attempts,omitempty"`
+	ExpectedOutput   int           `yaml:"expected_output_tokens" json:"expected_output_tokens,omitempty"`
+	Baseline         string        `yaml:"baseline" json:"baseline,omitempty"`
+	Description      string        `yaml:"description" json:"description,omitempty"`
 }
 
 type RateLimits struct {
-	RPM        int `yaml:"rpm"`
-	ITPM       int `yaml:"itpm"`
-	OTPM       int `yaml:"otpm"`
-	Concurrent int `yaml:"concurrent"`
+	RPM        int `yaml:"rpm" json:"rpm,omitempty"`
+	ITPM       int `yaml:"itpm" json:"itpm,omitempty"`
+	OTPM       int `yaml:"otpm" json:"otpm,omitempty"`
+	Concurrent int `yaml:"concurrent" json:"concurrent,omitempty"`
 }
 
 type Caps struct {
-	MaxRequestBytes int `yaml:"max_request_bytes"`
-	MaxMessages     int `yaml:"max_messages"`
-	MaxOutputTokens int `yaml:"max_output_tokens"`
+	MaxRequestBytes int `yaml:"max_request_bytes" json:"max_request_bytes,omitempty"`
+	MaxMessages     int `yaml:"max_messages" json:"max_messages,omitempty"`
+	MaxOutputTokens int `yaml:"max_output_tokens" json:"max_output_tokens,omitempty"`
 }
 
 type Scopes struct {
-	Models           []string   `yaml:"models"` // glob patterns; empty = all
-	Endpoints        []string   `yaml:"endpoints"`
-	Providers        []string   `yaml:"providers"`
-	MaxCostUSD       *float64   `yaml:"max_cost_usd"`
-	RateLimits       RateLimits `yaml:"rate_limits"`
-	Priority         int        `yaml:"priority"` // higher is more important [RES-09]
-	IPAllow          []string   `yaml:"ip_allow"`
-	DefaultTags      []string   `yaml:"default_tags"`
-	Policy           string     `yaml:"policy"`
-	Caps             Caps       `yaml:"caps"`
-	Baseline         string     `yaml:"baseline"`
-	AllowedResidency []string   `yaml:"allowed_residency"`
+	Models           []string   `yaml:"models" json:"models,omitempty"` // glob patterns; empty = all
+	Endpoints        []string   `yaml:"endpoints" json:"endpoints,omitempty"`
+	Providers        []string   `yaml:"providers" json:"providers,omitempty"`
+	MaxCostUSD       *float64   `yaml:"max_cost_usd" json:"max_cost_usd,omitempty"`
+	RateLimits       RateLimits `yaml:"rate_limits" json:"rate_limits,omitempty"`
+	Priority         int        `yaml:"priority" json:"priority,omitempty"` // higher is more important [RES-09]
+	IPAllow          []string   `yaml:"ip_allow" json:"ip_allow,omitempty"`
+	DefaultTags      []string   `yaml:"default_tags" json:"default_tags,omitempty"`
+	Policy           string     `yaml:"policy" json:"policy,omitempty"`
+	Caps             Caps       `yaml:"caps" json:"caps,omitempty"`
+	Baseline         string     `yaml:"baseline" json:"baseline,omitempty"`
+	AllowedResidency []string   `yaml:"allowed_residency" json:"allowed_residency,omitempty"`
 }
 
 type Key struct {
-	ID        string     `yaml:"id"`
-	Name      string     `yaml:"name"`
-	Secret    SecretRef  `yaml:"secret"` // bootstrap keys only; API-created keys are stored hashed
-	ExpiresAt *time.Time `yaml:"expires_at"`
-	Scopes    Scopes     `yaml:"scopes"`
+	ID        string     `yaml:"id" json:"id,omitempty"`
+	Name      string     `yaml:"name" json:"name,omitempty"`
+	Secret    SecretRef  `yaml:"secret" json:"secret,omitempty"` // bootstrap keys only; API-created keys are stored hashed
+	ExpiresAt *time.Time `yaml:"expires_at" json:"expires_at,omitempty"`
+	Scopes    Scopes     `yaml:"scopes" json:"scopes,omitempty"`
 }
 
 type Project struct {
-	ID       string     `yaml:"id"`
-	Name     string     `yaml:"name"`
-	Policy   string     `yaml:"policy"`
-	Limits   RateLimits `yaml:"rate_limits"`
-	Baseline string     `yaml:"baseline"`
-	Keys     []Key      `yaml:"keys"`
+	ID       string     `yaml:"id" json:"id,omitempty"`
+	Name     string     `yaml:"name" json:"name,omitempty"`
+	Policy   string     `yaml:"policy" json:"policy,omitempty"`
+	Limits   RateLimits `yaml:"rate_limits" json:"rate_limits,omitempty"`
+	Baseline string     `yaml:"baseline" json:"baseline,omitempty"`
+	Keys     []Key      `yaml:"keys" json:"keys,omitempty"`
 }
 
 type TenantCache struct {
-	Shared bool `yaml:"shared"` // opt into the cross-tenant namespace [CCH-03]
+	Shared bool `yaml:"shared" json:"shared,omitempty"` // opt into the cross-tenant namespace [CCH-03]
 }
 
 type BodyLogging struct {
-	Enabled   bool     `yaml:"enabled"`
-	Retention Duration `yaml:"retention"`
+	Enabled   bool     `yaml:"enabled" json:"enabled,omitempty"`
+	Retention Duration `yaml:"retention" json:"retention,omitempty"`
 }
 
 type Tenant struct {
-	ID            string      `yaml:"id"`
-	Name          string      `yaml:"name"`
-	Policy        string      `yaml:"policy"`
-	Limits        RateLimits  `yaml:"rate_limits"`
-	Caps          Caps        `yaml:"caps"`
-	Baseline      string      `yaml:"baseline"`
-	Cache         TenantCache `yaml:"cache"`
-	BodyLogging   BodyLogging `yaml:"body_logging"`
-	PII           string      `yaml:"pii"` // off | log | redact | block
-	AllowedModels []string    `yaml:"allowed_models"`
-	Projects      []Project   `yaml:"projects"`
+	ID            string      `yaml:"id" json:"id,omitempty"`
+	Name          string      `yaml:"name" json:"name,omitempty"`
+	Policy        string      `yaml:"policy" json:"policy,omitempty"`
+	Limits        RateLimits  `yaml:"rate_limits" json:"rate_limits,omitempty"`
+	Caps          Caps        `yaml:"caps" json:"caps,omitempty"`
+	Baseline      string      `yaml:"baseline" json:"baseline,omitempty"`
+	Cache         TenantCache `yaml:"cache" json:"cache,omitempty"`
+	BodyLogging   BodyLogging `yaml:"body_logging" json:"body_logging,omitempty"`
+	PII           string      `yaml:"pii" json:"pii,omitempty"` // off | log | redact | block
+	AllowedModels []string    `yaml:"allowed_models" json:"allowed_models,omitempty"`
+	Projects      []Project   `yaml:"projects" json:"projects,omitempty"`
 }
 
 type AdminCred struct {
-	ID     string    `yaml:"id"`
-	Role   string    `yaml:"role"` // org_admin | tenant_admin | finops_viewer | auditor
-	Tenant string    `yaml:"tenant"`
-	Secret SecretRef `yaml:"secret"`
+	ID     string    `yaml:"id" json:"id,omitempty"`
+	Role   string    `yaml:"role" json:"role,omitempty"` // org_admin | tenant_admin | finops_viewer | auditor
+	Tenant string    `yaml:"tenant" json:"tenant,omitempty"`
+	Secret SecretRef `yaml:"secret" json:"secret,omitempty"`
 }
 
 type Budget struct {
-	ID        string    `yaml:"id"`
-	Scope     string    `yaml:"scope"` // tenant | project | key | end_user | eval | shadow
-	ScopeID   string    `yaml:"scope_id"`
-	Period    string    `yaml:"period"` // daily | weekly | monthly | custom
-	Custom    Duration  `yaml:"custom_period"`
-	Anchor    time.Time `yaml:"anchor"`
-	Timezone  string    `yaml:"timezone"`
-	HardUSD   float64   `yaml:"hard_usd"`
-	SoftPct   []float64 `yaml:"soft_pct"`
-	AlertSink []string  `yaml:"alerts"`
+	ID        string    `yaml:"id" json:"id,omitempty"`
+	Scope     string    `yaml:"scope" json:"scope,omitempty"` // tenant | project | key | end_user | eval | shadow
+	ScopeID   string    `yaml:"scope_id" json:"scope_id,omitempty"`
+	Period    string    `yaml:"period" json:"period,omitempty"` // daily | weekly | monthly | custom
+	Custom    Duration  `yaml:"custom_period" json:"custom_period,omitempty"`
+	Anchor    time.Time `yaml:"anchor" json:"anchor,omitempty"`
+	Timezone  string    `yaml:"timezone" json:"timezone,omitempty"`
+	HardUSD   float64   `yaml:"hard_usd" json:"hard_usd,omitempty"`
+	SoftPct   []float64 `yaml:"soft_pct" json:"soft_pct,omitempty"`
+	AlertSink []string  `yaml:"alerts" json:"alerts,omitempty"`
 }
 
 type AlertSink struct {
-	ID      string    `yaml:"id"`
-	Type    string    `yaml:"type"` // webhook | slack
-	URL     SecretRef `yaml:"url"`
-	Timeout Duration  `yaml:"timeout"`
+	ID      string    `yaml:"id" json:"id,omitempty"`
+	Type    string    `yaml:"type" json:"type,omitempty"` // webhook | slack
+	URL     SecretRef `yaml:"url" json:"url,omitempty"`
+	Timeout Duration  `yaml:"timeout" json:"timeout,omitempty"`
+	// AllowPrivateNetwork permits a sink on a private or loopback address (SSRF guard) [NFR-14].
+	AllowPrivateNetwork bool `yaml:"allow_private_network" json:"allow_private_network,omitempty"`
 }
 
 type Cache struct {
-	Enabled              bool     `yaml:"enabled"`
-	TTL                  Duration `yaml:"ttl"`
-	MaxEntries           int      `yaml:"max_entries"`
-	MaxTemperature       float64  `yaml:"max_temperature"`
-	Semantic             bool     `yaml:"semantic"`
-	SemanticThreshold    float64  `yaml:"semantic_threshold"`
-	Embedder             string   `yaml:"embedder"`
-	PriceUSD             float64  `yaml:"price_usd"`
-	JudgeHits            string   `yaml:"judge_hits"` // deployment to verify semantic hits [CCH-09]
-	SampleRate           float64  `yaml:"sample_rate"`
-	MaxSemanticPerBucket int      `yaml:"max_semantic_per_bucket"`
+	Enabled              bool     `yaml:"enabled" json:"enabled,omitempty"`
+	TTL                  Duration `yaml:"ttl" json:"ttl,omitempty"`
+	MaxEntries           int      `yaml:"max_entries" json:"max_entries,omitempty"`
+	MaxTemperature       float64  `yaml:"max_temperature" json:"max_temperature,omitempty"`
+	Semantic             bool     `yaml:"semantic" json:"semantic,omitempty"`
+	SemanticThreshold    float64  `yaml:"semantic_threshold" json:"semantic_threshold,omitempty"`
+	Embedder             string   `yaml:"embedder" json:"embedder,omitempty"`
+	PriceUSD             float64  `yaml:"price_usd" json:"price_usd,omitempty"`
+	JudgeHits            string   `yaml:"judge_hits" json:"judge_hits,omitempty"` // deployment to verify semantic hits [CCH-09]
+	SampleRate           float64  `yaml:"sample_rate" json:"sample_rate,omitempty"`
+	MaxSemanticPerBucket int      `yaml:"max_semantic_per_bucket" json:"max_semantic_per_bucket,omitempty"`
 }
 
 type Guardrails struct {
-	Caps           Caps                `yaml:"caps"`
-	PII            string              `yaml:"pii"`         // off | log | redact | block (default for tenants)
-	Sensitivity    map[string][]string `yaml:"sensitivity"` // level -> allowed residency tags
-	PreWebhook     string              `yaml:"pre_webhook"`
-	PostWebhook    string              `yaml:"post_webhook"`
-	WebhookTimeout Duration            `yaml:"webhook_timeout"`
-	FailOpen       bool                `yaml:"fail_open"`
+	Caps           Caps                `yaml:"caps" json:"caps,omitempty"`
+	PII            string              `yaml:"pii" json:"pii,omitempty"`                 // off | log | redact | block (default for tenants)
+	Sensitivity    map[string][]string `yaml:"sensitivity" json:"sensitivity,omitempty"` // level -> allowed residency tags
+	PreWebhook     string              `yaml:"pre_webhook" json:"pre_webhook,omitempty"`
+	PostWebhook    string              `yaml:"post_webhook" json:"post_webhook,omitempty"`
+	WebhookTimeout Duration            `yaml:"webhook_timeout" json:"webhook_timeout,omitempty"`
+	FailOpen       bool                `yaml:"fail_open" json:"fail_open,omitempty"`
 }
 
 type Breaker struct {
-	Window       Duration `yaml:"window"`
-	MinRequests  int      `yaml:"min_requests"`
-	ErrorRate    float64  `yaml:"error_rate"`
-	LatencyP95Ms float64  `yaml:"latency_p95_ms"`
-	CoolDown     Duration `yaml:"cool_down"`
-	Consecutive  int      `yaml:"consecutive_failures"`
+	Window       Duration `yaml:"window" json:"window,omitempty"`
+	MinRequests  int      `yaml:"min_requests" json:"min_requests,omitempty"`
+	ErrorRate    float64  `yaml:"error_rate" json:"error_rate,omitempty"`
+	LatencyP95Ms float64  `yaml:"latency_p95_ms" json:"latency_p95_ms,omitempty"`
+	CoolDown     Duration `yaml:"cool_down" json:"cool_down,omitempty"`
+	Consecutive  int      `yaml:"consecutive_failures" json:"consecutive_failures,omitempty"`
 }
 
 type Resilience struct {
-	MaxAttempts   int      `yaml:"max_attempts"`
-	TotalDeadline Duration `yaml:"total_deadline"`
-	BackoffBase   Duration `yaml:"backoff_base"`
-	BackoffMax    Duration `yaml:"backoff_max"`
-	Breaker       Breaker  `yaml:"breaker"`
-	Timeouts      Timeouts `yaml:"timeouts"`
-	MaxTimeouts   Timeouts `yaml:"max_timeouts"` // bounds for per-request overrides
-	LatencyAlpha  float64  `yaml:"latency_alpha"`
+	MaxAttempts   int      `yaml:"max_attempts" json:"max_attempts,omitempty"`
+	TotalDeadline Duration `yaml:"total_deadline" json:"total_deadline,omitempty"`
+	BackoffBase   Duration `yaml:"backoff_base" json:"backoff_base,omitempty"`
+	BackoffMax    Duration `yaml:"backoff_max" json:"backoff_max,omitempty"`
+	Breaker       Breaker  `yaml:"breaker" json:"breaker,omitempty"`
+	Timeouts      Timeouts `yaml:"timeouts" json:"timeouts,omitempty"`
+	MaxTimeouts   Timeouts `yaml:"max_timeouts" json:"max_timeouts,omitempty"` // bounds for per-request overrides
+	LatencyAlpha  float64  `yaml:"latency_alpha" json:"latency_alpha,omitempty"`
 }
 
 type Observability struct {
-	LogRequests  *bool                `yaml:"log_requests"`
-	OTLPEndpoint string               `yaml:"otlp_endpoint"`
-	OTLPHeaders  map[string]SecretRef `yaml:"otlp_headers"`
-	Langfuse     *Exporter            `yaml:"langfuse"`
-	LangSmith    *Exporter            `yaml:"langsmith"`
-	TraceSample  float64              `yaml:"trace_sample"`
+	LogRequests  *bool                `yaml:"log_requests" json:"log_requests,omitempty"`
+	OTLPEndpoint string               `yaml:"otlp_endpoint" json:"otlp_endpoint,omitempty"`
+	OTLPHeaders  map[string]SecretRef `yaml:"otlp_headers" json:"otlp_headers,omitempty"`
+	Langfuse     *Exporter            `yaml:"langfuse" json:"langfuse,omitempty"`
+	LangSmith    *Exporter            `yaml:"langsmith" json:"langsmith,omitempty"`
+	TraceSample  float64              `yaml:"trace_sample" json:"trace_sample,omitempty"`
 }
 
 type Exporter struct {
-	Endpoint string    `yaml:"endpoint"`
-	Key      SecretRef `yaml:"key"`
-	Secret   SecretRef `yaml:"secret"`
+	Endpoint string    `yaml:"endpoint" json:"endpoint,omitempty"`
+	Key      SecretRef `yaml:"key" json:"key,omitempty"`
+	Secret   SecretRef `yaml:"secret" json:"secret,omitempty"`
 }
 
 type RoutingDefaults struct {
-	Policy          string  `yaml:"policy"`
-	Baseline        string  `yaml:"baseline"`
-	MaxOutputTokens int     `yaml:"max_output_tokens"`
-	Currency        string  `yaml:"display_currency"`
-	ExchangeRate    float64 `yaml:"exchange_rate"`
+	Policy          string  `yaml:"policy" json:"policy,omitempty"`
+	Baseline        string  `yaml:"baseline" json:"baseline,omitempty"`
+	MaxOutputTokens int     `yaml:"max_output_tokens" json:"max_output_tokens,omitempty"`
+	Currency        string  `yaml:"display_currency" json:"display_currency,omitempty"`
+	ExchangeRate    float64 `yaml:"exchange_rate" json:"exchange_rate,omitempty"`
 }
 
 type Evals struct {
-	Dir         string  `yaml:"dir"`
-	GateMaxDrop float64 `yaml:"gate_max_drop"`
-	Judge       string  `yaml:"judge"`
-	Embedder    string  `yaml:"embedder"`
+	Dir         string  `yaml:"dir" json:"dir,omitempty"`
+	GateMaxDrop float64 `yaml:"gate_max_drop" json:"gate_max_drop,omitempty"`
+	Judge       string  `yaml:"judge" json:"judge,omitempty"`
+	Embedder    string  `yaml:"embedder" json:"embedder,omitempty"`
 }
 
 var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}`)

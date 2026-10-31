@@ -177,17 +177,9 @@ func (s *Server) Shed(p *governance.Principal, hintPriority *int) *api.Error {
 	return nil
 }
 
-// Revoked is set by governance to check fast-path revocations [TEN-02].
-var revokedCheck atomic.Pointer[func(string) bool]
-
-func SetRevocationCheck(f func(string) bool) { revokedCheck.Store(&f) }
-
-func (s *Server) revoked(id string) bool {
-	if f := revokedCheck.Load(); f != nil {
-		return (*f)(id)
-	}
-	return false
-}
+// revoked checks the fast-path revocation set, which every instance receives over the
+// shared counters' pub/sub within milliseconds [TEN-02].
+func (s *Server) revoked(id string) bool { return s.Engine.Gov.IsRevoked(id) }
 
 func (s *Server) newRC(r *http.Request, endpoint string, f api.Format) *gateway.RequestContext {
 	rid := r.Header.Get("X-Request-Id")

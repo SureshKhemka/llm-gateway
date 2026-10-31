@@ -7,6 +7,7 @@ import (
 
 	"github.com/SureshKhemka/llm-gateway/internal/api"
 	"github.com/SureshKhemka/llm-gateway/internal/catalog"
+	"github.com/SureshKhemka/llm-gateway/internal/cost"
 	"github.com/SureshKhemka/llm-gateway/internal/observe"
 	"github.com/SureshKhemka/llm-gateway/internal/provider"
 	"github.com/SureshKhemka/llm-gateway/internal/resilience"
@@ -29,6 +30,15 @@ type held struct {
 // RES-05, RES-07]. Every candidate comes from the already-filtered set, so fallback
 // never relaxes a hard constraint [RES-08].
 func (e *Engine) execute(ctx context.Context, s *Snapshot, rc *RequestContext, p *Plan, meta *Meta, run attemptFunc) (*held, error) {
+	// Budget: every attempt must be covered by a worst-case reservation; a pricier
+	// fallback grows it or is skipped [BUD-03].
+	pre := func(d *catalog.Deployment) *api.Error {
+		if rc.reservation == nil {
+			return nil
+		}
+		return rc.reservation.Grow(ctx, e.worstCase(s, rc, p, d))
+	}
+	var skipErr error
 	rcfg := s.Config.Resilience
 	maxAttempts := rcfg.MaxAttempts
 	if p.Policy != nil && p.Policy.MaxAttempts > 0 {
@@ -55,6 +65,14 @@ func (e *Engine) execute(ctx context.Context, s *Snapshot, rc *RequestContext, p
 		}
 		d := list[idx]
 		idx++
+		if berr := pre(d); berr != nil {
+			if !skipped[d.ID+"/budget"] {
+				meta.Attempts = append(meta.Attempts, observe.Attempt{Deployment: d.ID, Provider: d.Provider, Kind: "skip", Status: "skipped", Error: berr.Code})
+				skipped[d.ID+"/budget"] = true
+			}
+			skipErr = berr
+			continue
+		}
 		if !e.Health.Acquire(d.ID) {
 			if !skipped[d.ID+"/circuit"] {
 				meta.Attempts = append(meta.Attempts, observe.Attempt{Deployment: d.ID, Provider: d.Provider, Kind: "skip", Status: "skipped", Error: "circuit_open"})
@@ -118,10 +136,24 @@ func (e *Engine) execute(ctx context.Context, s *Snapshot, rc *RequestContext, p
 		}
 	}
 	meta.FallbackAttempts = max(0, attempts-1)
+	if lastErr == nil && skipErr != nil {
+		return nil, skipErr
+	}
 	if lastErr == nil {
 		return nil, api.NewError(api.CodeUpstreamUnavailable, "every eligible deployment is unavailable (circuit open)")
 	}
 	return nil, lastErr
+}
+
+// worstCase is the reservation for serving the request on d: estimated input (inflated
+// by the safety factor) at the input price plus the output cap at the output price.
+func (e *Engine) worstCase(s *Snapshot, rc *RequestContext, p *Plan, d *catalog.Deployment) float64 {
+	in := int(float64(p.PromptTokens) * e.Gov.InputSafety)
+	out := min(p.MaxOutput, d.MaxOutputTokens)
+	if out <= 0 {
+		out = d.MaxOutputTokens
+	}
+	return cost.WorstCase(d, rc.Start, in, out)
 }
 
 // Pins remembers which deployment served each session [RTE-11]. Entries expire after TTL.

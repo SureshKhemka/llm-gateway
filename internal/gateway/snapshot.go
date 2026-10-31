@@ -16,16 +16,35 @@ import (
 // Snapshot is an immutable view of configuration and derived state. Reloads build a new
 // snapshot and swap it atomically; in-flight requests keep theirs [PRV-07, CFG-03].
 type Snapshot struct {
-	Version   int64
-	Loaded    time.Time
-	Config    *config.Config
-	Catalog   *catalog.Catalog
-	Policies  map[string]*config.Policy // active version per policy name
-	AllPolicy map[string][]config.Policy
-	Keys      *governance.KeyIndex
-	Providers *provider.Registry
-	Tenants   map[string]*config.Tenant
-	Projects  map[string]*config.Project
+	Version int64
+	Loaded  time.Time
+	// Config is the effective configuration (files plus admin-API objects); FileConfig
+	// is what the files alone say.
+	Config     *config.Config
+	FileConfig *config.Config
+	Catalog    *catalog.Catalog
+	Policies   map[string]*config.Policy // active version per policy name
+	AllPolicy  map[string][]config.Policy
+	Keys       *governance.KeyIndex
+	Providers  *provider.Registry
+	Tenants    map[string]*config.Tenant
+	Projects   map[string]*config.Project
+	Grants     []governance.Grant
+	// Admins maps admin credential hashes to their definitions [TEN-04].
+	Admins map[string]*config.AdminCred
+}
+
+func buildAdmins(cfg *config.Config) (map[string]*config.AdminCred, error) {
+	out := map[string]*config.AdminCred{}
+	for i := range cfg.Admins {
+		a := &cfg.Admins[i]
+		secret, err := a.Secret.Resolve()
+		if err != nil {
+			return nil, fmt.Errorf("admin %s: %w", a.ID, err)
+		}
+		out[string(governance.HashKey(secret))] = a
+	}
+	return out, nil
 }
 
 // ProviderFactory builds adapters; tests swap it to point at in-process simulators.
@@ -53,6 +72,7 @@ type BuildInput struct {
 	PolicyVers  []store.PolicyVersion
 	Discovered  []*catalog.Deployment
 	Factory     ProviderFactory
+	Grants      []governance.Grant
 	PrevVersion int64
 	// Reuse lets a reload keep existing provider adapters (and their connection pools).
 	Reuse *provider.Registry
@@ -91,6 +111,7 @@ func BuildSnapshot(in BuildInput) (*Snapshot, error) {
 	s := &Snapshot{
 		Version: in.PrevVersion + 1, Loaded: time.Now(), Config: cfg, Catalog: cat,
 		Keys: keys, Providers: reg, Tenants: map[string]*config.Tenant{}, Projects: map[string]*config.Project{},
+		Grants: in.Grants,
 	}
 	for i := range cfg.Tenants {
 		t := &cfg.Tenants[i]
@@ -100,6 +121,10 @@ func BuildSnapshot(in BuildInput) (*Snapshot, error) {
 		}
 	}
 	s.Policies, s.AllPolicy = resolvePolicies(cfg, in.PolicyVers)
+	s.FileConfig = cfg
+	if s.Admins, err = buildAdmins(cfg); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 

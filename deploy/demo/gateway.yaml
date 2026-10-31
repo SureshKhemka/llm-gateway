@@ -130,6 +130,17 @@ deployments:
     residency: [local]
     prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.02, output: 0}]
 
+admins:
+  - id: demo-admin
+    role: org_admin
+    secret: env:DEMO_ADMIN_KEY
+
+alerts:
+  - id: demo-hook
+    type: webhook
+    url: env:DEMO_ALERT_URL
+    allow_private_network: true
+
 tenants:
   - id: team-a
     name: Team A

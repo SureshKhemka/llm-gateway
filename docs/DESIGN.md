@@ -255,6 +255,8 @@ drain in-flight up to `server.drain_timeout` [RES-10].
 - Virtual keys: `gw-<env>-<8 char id>_<32 random>`; stored as SHA-256 (keys are high-entropy
   so a fast hash is non-reversible in practice); prefix visible; optional expiry; rotation
   creates a new key and sets `overlap_until` on the old one [TEN-02]. Scopes per §6 [TEN-03].
+- File-defined (bootstrap) keys can be rotated and revoked through the API: the
+  revocation is stored as a document and applied on every rebuild.
 - Admin credentials are separate from virtual keys, with roles `org_admin`, `tenant_admin`
   (bound to a tenant), `finops_viewer`, `auditor`. One permission table is used by the
   admin API, console (calls the same API) and CLI (calls the same API) [TEN-04, ADM-05].
@@ -265,7 +267,20 @@ drain in-flight up to `server.drain_timeout` [RES-10].
   JSON and Slack `text`) fire once per threshold per period via a Redis `SETNX` latch [BUD-07].
 - Rate limits: per key/project/tenant, 429 `rate_limited` + `Retry-After` +
   `x-ratelimit-limit-*`/`-remaining-*`/`-reset-*` headers [BUD-04].
-- Changes apply via snapshot reload (≤ 10 s by the reload poller) [BUD-06].
+- Changes apply via snapshot reload: immediately on the instance that served the admin
+  call, and on every other instance at its next refresh (`server.reload_every`, default
+  5 s) [BUD-06].
+- Reservation (as implemented): before the first upstream call the request is admitted
+  (rate limits) and its applicable budgets resolved. Each attempt must be covered by a
+  worst-case reservation for *that* deployment — `ceil(prompt_tokens × 1.3) × input price
+  + output cap × max(output, reasoning) price` — so a fallback to a pricier deployment
+  grows the reservation or is skipped (`budget_exceeded` if nothing fits). With a hard
+  budget in scope and no client `max_tokens`, the gateway sets `max_tokens` to
+  `defaults.max_output_tokens` so the reservation is a true bound; estimated output counts
+  are clamped to that cap. Settlement replaces the reservation with actual cost.
+- Degradation caps the tier as a strong preference: deployments above the cap stay at the
+  end of the attempt list, so a request only a bigger model can serve (vision, long
+  context) is still served.
 
 ## 10. Caching [CCH-*]
 

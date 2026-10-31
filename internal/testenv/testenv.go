@@ -4,6 +4,7 @@ package testenv
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,8 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SureshKhemka/llm-gateway/internal/admin"
 	"github.com/SureshKhemka/llm-gateway/internal/config"
 	"github.com/SureshKhemka/llm-gateway/internal/gateway"
+	"github.com/SureshKhemka/llm-gateway/internal/governance"
 	"github.com/SureshKhemka/llm-gateway/internal/observe"
 	"github.com/SureshKhemka/llm-gateway/internal/server"
 	"github.com/SureshKhemka/llm-gateway/internal/sim"
@@ -97,16 +100,18 @@ deployments:
 `
 
 type Env struct {
-	T       testing.TB
-	Sims    map[string]*sim.Instance
-	simSrv  map[string]*httptest.Server
-	Config  *config.Config
-	Engine  *gateway.Engine
-	Server  *server.Server
-	HTTP    *httptest.Server
-	Events  *observe.Recorder
-	Store   store.Store
-	cleanup []func()
+	T        testing.TB
+	Admin    *admin.API
+	Counters governance.Counters
+	Sims     map[string]*sim.Instance
+	simSrv   map[string]*httptest.Server
+	Config   *config.Config
+	Engine   *gateway.Engine
+	Server   *server.Server
+	HTTP     *httptest.Server
+	Events   *observe.Recorder
+	Store    store.Store
+	cleanup  []func()
 }
 
 // Options configure an environment. YAML may reference ${SIM_<NAME>_URL} for each sim.
@@ -115,6 +120,9 @@ type Options struct {
 	YAML  string
 	Env   map[string]string
 	Store store.Store
+	// Counters back budgets and rate limits (default in-memory; pass Redis counters for
+	// multi-instance tests).
+	Counters governance.Counters
 	// Setup runs after the engine is built but before the HTTP server starts.
 	Setup func(*Env)
 }
@@ -150,14 +158,42 @@ func New(t testing.TB, o Options) *Env {
 	if env.Store == nil {
 		env.Store = store.NewMemory()
 	}
-	env.Engine = gateway.NewEngine(snap, gateway.EngineOptions{Store: env.Store, Events: env.Events})
+	env.Counters = o.Counters
+	if env.Counters == nil {
+		env.Counters = governance.NewMemCounters()
+	}
+	env.Engine = gateway.NewEngine(snap, gateway.EngineOptions{Store: env.Store, Events: env.Events, Counters: env.Counters})
+	env.Engine.Gov.WatchRevocations(context.Background())
 	env.Server = server.New(env.Engine, nil)
+	env.Admin = admin.New(env.Engine)
+	env.Admin.Mount(env.Server.Mux)
 	if o.Setup != nil {
 		o.Setup(env)
 	}
 	env.HTTP = httptest.NewServer(env.Server.Handler())
 	t.Cleanup(env.Close)
 	return env
+}
+
+// Instance is a second gateway instance sharing this environment's store, counters and
+// configuration (multi-instance tests) [BUD-05].
+type Instance struct {
+	Engine *gateway.Engine
+	HTTP   *httptest.Server
+}
+
+func (e *Env) SecondInstance() *Instance {
+	snap, err := gateway.BuildSnapshot(gateway.BuildInput{Config: e.Config})
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	eng := gateway.NewEngine(snap, gateway.EngineOptions{Store: e.Store, Events: e.Events, Counters: e.Counters})
+	eng.Gov.WatchRevocations(context.Background())
+	srv := server.New(eng, nil)
+	admin.New(eng).Mount(srv.Mux)
+	h := httptest.NewServer(srv.Handler())
+	e.cleanup = append(e.cleanup, h.Close, eng.Close)
+	return &Instance{Engine: eng, HTTP: h}
 }
 
 func (e *Env) Close() {
@@ -220,6 +256,12 @@ func (r *Response) Map() map[string]any {
 // Do sends a request to the gateway.
 func (e *Env) Do(method, path, key string, body any, headers map[string]string) *Response {
 	e.T.Helper()
+	return e.DoAt(e.HTTP.URL, method, path, key, body, headers)
+}
+
+// DoAt sends a request to the gateway at base (e.g. a second instance).
+func (e *Env) DoAt(base, method, path, key string, body any, headers map[string]string) *Response {
+	e.T.Helper()
 	var rdr io.Reader
 	if body != nil {
 		switch b := body.(type) {
@@ -232,7 +274,7 @@ func (e *Env) Do(method, path, key string, body any, headers map[string]string) 
 			rdr = bytes.NewReader(raw)
 		}
 	}
-	req, _ := http.NewRequest(method, e.HTTP.URL+path, rdr)
+	req, _ := http.NewRequest(method, base+path, rdr)
 	req.Header.Set("Content-Type", "application/json")
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)

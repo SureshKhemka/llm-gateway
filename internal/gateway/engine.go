@@ -13,6 +13,7 @@ import (
 	"github.com/SureshKhemka/llm-gateway/internal/catalog"
 	"github.com/SureshKhemka/llm-gateway/internal/config"
 	"github.com/SureshKhemka/llm-gateway/internal/cost"
+	"github.com/SureshKhemka/llm-gateway/internal/governance"
 	"github.com/SureshKhemka/llm-gateway/internal/observe"
 	"github.com/SureshKhemka/llm-gateway/internal/provider"
 	"github.com/SureshKhemka/llm-gateway/internal/resilience"
@@ -36,6 +37,9 @@ type Engine struct {
 	Health     *resilience.Tracker
 	Limiter    *resilience.Limiter
 	Pins       *Pins
+	Gov        *governance.Governor
+	Discovery  *Discovery
+	Factory    ProviderFactory
 	Hooks      RouteHooks
 	Estimators map[string]EstimatorFunc
 }
@@ -46,6 +50,9 @@ type EngineOptions struct {
 	Log    *slog.Logger
 	Now    func() time.Time
 	WALDir string
+	// Counters back budgets and rate limits (Redis in production); nil = in-memory.
+	Counters governance.Counters
+	Factory  ProviderFactory
 }
 
 func NewEngine(s *Snapshot, o EngineOptions) *Engine {
@@ -67,6 +74,14 @@ func NewEngine(s *Snapshot, o EngineOptions) *Engine {
 		Health:  resilience.NewTracker(BreakerConfig(s)),
 		Limiter: resilience.NewLimiter(),
 		Pins:    NewPins(30 * time.Minute)}
+	if o.Counters == nil {
+		o.Counters = governance.NewMemCounters()
+	}
+	e.Gov = governance.NewGovernor(o.Counters, o.Log)
+	e.Discovery = NewDiscovery()
+	e.Factory = o.Factory
+	e.Gov.FailOpen = s.Config.Storage.BudgetsFailOpen
+	e.Gov.Alerts.SetSinks(s.Config.Alerts)
 	e.Hooks = RouteHooks{
 		Health: func(dep string) (string, bool) {
 			h, ok := e.Health.Available(dep)
@@ -75,6 +90,9 @@ func NewEngine(s *Snapshot, o EngineOptions) *Engine {
 		InFlight: e.Limiter.InFlight,
 		Pinned:   e.Pins.Get,
 		Cold:     e.Health.Cold,
+		BudgetUtilisation: func(rc *RequestContext) float64 {
+			return e.Gov.Utilisation(context.Background(), rc.budgets)
+		},
 	}
 	e.snap.Store(s)
 	return e
@@ -91,6 +109,38 @@ func (e *Engine) Snapshot() *Snapshot { return e.snap.Load() }
 func (e *Engine) Swap(s *Snapshot) {
 	e.snap.Store(s)
 	e.Health.SetConfig(BreakerConfig(s))
+	e.Gov.FailOpen = s.Config.Storage.BudgetsFailOpen
+	e.Gov.Alerts.SetSinks(s.Config.Alerts)
+}
+
+// govern applies rate limits and reserves budget before any upstream call [BUD-03,
+// BUD-04]. It must run after plan() so the reservation can price the candidates.
+func (e *Engine) admit(ctx context.Context, s *Snapshot, rc *RequestContext, req *api.ChatRequest, promptTokens int) *api.Error {
+	if rc.Explain {
+		return nil
+	}
+	pr := rc.Principal
+	ad, aerr := e.Gov.Admit(ctx, rc.ID, governance.RateScopes(pr), promptTokens)
+	if aerr != nil {
+		return aerr
+	}
+	rc.admission = ad
+	rc.budgets = e.Gov.Applicable(s.Config.Budgets, s.Grants, governance.Scope{
+		Tenant: pr.TenantID(), Project: pr.ProjectID(), Key: pr.KeyID, EndUser: rc.EndUser(),
+		Eval: rc.EvalRun != "", Shadow: rc.Shadow})
+	if len(rc.budgets) > 0 && req != nil && req.MaxOutput(0) == 0 {
+		// Under a hard budget the output cap must be explicit so the reservation is a
+		// true worst case.
+		cap := s.Config.Defaults.MaxOutputTokens
+		req.MaxTokens = &cap
+		rc.maxOutCap = cap
+	}
+	res, berr := e.Gov.Reserve(ctx, rc.budgets, 0)
+	if berr != nil {
+		return berr
+	}
+	rc.reservation = res
+	return nil
 }
 func (e *Engine) Close() { e.Writer.Close() }
 
@@ -196,7 +246,16 @@ func usageFrom(req *api.ChatRequest, u *api.Usage, text string, calls []api.Tool
 	if u != nil && (u.PromptTokens > 0 || u.CompletionTokens > 0) {
 		return provider.UsageOf(u)
 	}
-	return cost.Usage{Input: tokens.Prompt(req), Output: tokens.Completion(text, calls), Estimated: true}
+	return cost.Usage{Input: tokens.Prompt(req), Output: capOutput(req, tokens.Completion(text, calls)), Estimated: true}
+}
+
+// capOutput bounds an estimated output count by the request's output cap: the model
+// cannot have produced more, and budgets reserved exactly that much [BUD-03].
+func capOutput(req *api.ChatRequest, n int) int {
+	if c := req.MaxOutput(0); c > 0 && n > c {
+		return c
+	}
+	return n
 }
 
 func responseText(r *api.ChatResponse) (string, []api.ToolCall) {
@@ -224,6 +283,9 @@ func applyPlan(m *Meta, p *Plan) {
 func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequest) (*api.ChatResponse, *Meta, error) {
 	s := e.Snapshot()
 	meta := e.newMeta(rc, req.Model)
+	if aerr := e.admit(ctx, s, rc, req, tokens.Prompt(req)); aerr != nil {
+		return nil, e.failPlan(s, rc, meta, nil, aerr), aerr
+	}
 	p, err := e.plan(s, rc, req)
 	if err != nil {
 		return nil, e.failPlan(s, rc, meta, p, err), err
@@ -352,6 +414,18 @@ func (e *Engine) finish(s *Snapshot, rc *RequestContext, meta *Meta, p *Plan, st
 	}
 	if rc.Explain {
 		return
+	}
+	ctx := context.Background()
+	rc.reservation.Settle(ctx, meta.CostUSD+meta.OverheadUSD)
+	rc.admission.Release(ctx, meta.Usage.TotalInput(), meta.Usage.TotalOutput())
+	if len(rc.budgets) > 0 {
+		meta.BudgetRemainingUSD = e.Gov.Remaining(ctx, rc.budgets)
+	}
+	for k, v := range rc.admissionHeaders() {
+		if meta.RateHeaders == nil {
+			meta.RateHeaders = map[string]string{}
+		}
+		meta.RateHeaders[k] = v
 	}
 	pr := rc.Principal
 	rec := store.CostRecord{
@@ -507,6 +581,10 @@ func (cs *ChatStream) absorb(ch *api.ChatChunk) bool {
 func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.ChatRequest) (*ChatStream, error) {
 	s := e.Snapshot()
 	meta := e.newMeta(rc, req.Model)
+	if aerr := e.admit(ctx, s, rc, req, tokens.Prompt(req)); aerr != nil {
+		e.failPlan(s, rc, meta, nil, aerr)
+		return &ChatStream{Meta: meta}, aerr
+	}
 	p, err := e.plan(s, rc, req)
 	if err != nil {
 		e.failPlan(s, rc, meta, p, err)
@@ -566,7 +644,7 @@ func (cs *ChatStream) Usage() cost.Usage {
 	if cs.FailErr == nil && cs.usage != nil {
 		return provider.UsageOf(cs.usage)
 	}
-	u := cost.Usage{Input: tokens.Prompt(cs.req), Output: tokens.Completion(cs.text.String(), calls), Estimated: true}
+	u := cost.Usage{Input: tokens.Prompt(cs.req), Output: capOutput(cs.req, tokens.Completion(cs.text.String(), calls)), Estimated: true}
 	if cs.usage != nil && cs.usage.PromptTokens > 0 {
 		u.Input = cs.usage.PromptTokens - cs.usage.Cached()
 		u.CachedInput = cs.usage.Cached()
@@ -625,6 +703,17 @@ func (e *Engine) Embeddings(ctx context.Context, rc *RequestContext, req *api.Em
 	d, perr := e.planEmbeddings(s, rc, req)
 	if perr != nil {
 		return nil, e.fail(s, rc, meta, perr), perr
+	}
+	inputs, _ := req.Inputs()
+	est := 0
+	for _, in := range inputs {
+		est += tokens.Count(in)
+	}
+	if aerr := e.admit(ctx, s, rc, nil, est); aerr != nil {
+		return nil, e.fail(s, rc, meta, aerr), aerr
+	}
+	if berr := rc.reservation.Grow(ctx, cost.WorstCase(d, rc.Start, int(float64(est)*e.Gov.InputSafety), 0)); berr != nil {
+		return nil, e.fail(s, rc, meta, berr), berr
 	}
 	meta.RouteReason = "explicit_model"
 	if _, vm := s.Catalog.VirtualModels[req.Model]; vm {

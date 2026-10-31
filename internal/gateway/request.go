@@ -52,6 +52,11 @@ type RequestContext struct {
 	Shadow    bool
 	// Explain asks the engine to plan only (route-explain) [RTE-15].
 	Explain bool
+
+	budgets     []governance.BudgetRef
+	reservation *governance.Reservation
+	admission   *governance.Admission
+	maxOutCap   int
 }
 
 func (rc *RequestContext) EndUser() string { return rc.Hints.EndUser }
@@ -159,4 +164,11 @@ func DecodePolicy(b []byte) (*config.Policy, error) {
 		}
 	}
 	return &p, nil
+}
+
+func (rc *RequestContext) admissionHeaders() map[string]string {
+	if rc.admission == nil {
+		return nil
+	}
+	return rc.admission.Headers
 }

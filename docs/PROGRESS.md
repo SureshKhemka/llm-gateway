@@ -165,3 +165,83 @@ The scenario suite (10 scenarios so far) passed 3 of 3 consecutive runs.
   budgets and limits to Redis. Cross-instance breaker hints and pins are M8 multi-instance
   work, and DESIGN §5.2 lists the keys.
 - Scenario 8 on LM Studio (unloading a model in the LM Studio UI) needs the Mac.
+
+## M4 — Governance ✅
+
+**Shipped**
+
+- **Shared counters:** Redis, using Lua scripts for atomic multi-key reserve, settle and
+  sliding-window checks, concurrency sets, alert latches and pub/sub. An in-memory
+  implementation covers single-node development. `storage.redis_url` and
+  `storage.postgres_dsn` switch the process to Redis and Postgres; when they are unset, the
+  gateway logs that it is in single-node mode.
+- **Budgets:** tenant, project, key, end-user (per user within a tenant), eval and shadow
+  scopes. Periods are daily, weekly (starting Monday), monthly or custom, resetting in the
+  budget's time zone.
+  - Before any upstream call, each attempt must be covered by a worst-case reservation. A
+    pricier fallback grows the reservation or is skipped.
+  - Settlement uses actual cost. Responses carry `X-Gw-Budget-Remaining-Usd`.
+  - The hard limit returns HTTP 402 `budget_exceeded`.
+  - Soft thresholds degrade routing to cheaper tiers. Above the cap, deployments are only
+    used for requests nothing cheaper can serve.
+  - Temporary grants have an expiry and a mandatory reason, and are audited.
+- **Alerts:** generic JSON and Slack-compatible webhooks, once per threshold per period
+  across instances (Redis `SETNX` latch). Webhook URLs are secret references behind an
+  SSRF guard that refuses private and metadata addresses unless the sink opts in.
+- **Rate limits:** RPM, input TPM, output TPM and concurrent requests, per key, project
+  and tenant, consistent across instances. A 429 carries `Retry-After` and
+  `X-Ratelimit-Limit/Remaining/Reset-*` headers.
+- **Virtual keys:**
+  - Generated as `gw-<env>-<id>_<secret>`, shown once, stored as a SHA-256 hash, with a
+    visible prefix.
+  - Optional expiry. Rotation creates a new key, with an overlap window for the old one.
+  - Revocation is broadcast over pub/sub; another instance rejected the key within
+    milliseconds in the test (requirement: 5 s).
+  - Scopes: models, endpoints, providers, max cost per request, rate limits, priority, IP
+    allow-list, default tags, policy and baseline.
+- **Admin API `/admin/v1`:** whoami, tenants, projects, keys (create, rotate, revoke,
+  list), budgets (list with status, create/update, grants), costs (JSON or CSV,
+  group-by, time buckets, filters, display currency), monthly chargeback, request
+  explorer (cost record plus decision), audit log, health, effective config, config
+  reload, cache invalidation hook.
+  - Four roles (org admin, tenant admin bound to one tenant, FinOps viewer, auditor),
+    enforced from one permission table.
+  - The OpenAPI 3.1 document is generated from the same route table.
+  - Objects defined in files return 409 on API edits, because files win.
+  - The admin API can be served on a separate listener (`server.admin_listen`).
+- **Audit log:** append-only, enforced in Postgres by a trigger. Every admin mutation
+  records actor, role, before, after and reason.
+- **Postgres store:** embedded, reversible migrations; SQL aggregation that reconciles
+  exactly with raw rows; hourly rollups for records older than 13 months, verified before
+  raw rows are deleted. `scripts/pg-test.sh` starts a throwaway cluster.
+
+**Requirement IDs covered by tests:** TEN-01, TEN-02, TEN-03, TEN-04, TEN-06, TEN-07,
+BUD-01, BUD-02, BUD-03, BUD-04, BUD-05, BUD-06, BUD-07, BUD-08, RTE-08, CST-01, CST-04,
+CST-05, CST-06, CST-07, CST-09, OBS-06, ADM-01 (partial; the console comes in M8), ADM-05
+(API side), NFR-07, NFR-08, NFR-14, NFR-18 (migrations).
+
+**Exit scenarios**
+
+| Scenario | Result |
+| --- | --- |
+| 6 Budget degradation and hard stop | Pass, with Redis-backed counters (miniredis). Replaying the corpus under a $0.50 monthly budget, routing degraded at 80% (1,035 requests degraded, ≥90% of them served at tier ≤ 1). At 100% requests got `budget_exceeded` (402). **Spend was $0.4982 of $0.50**, so no overshoot, and the budget counters agree with the sum of cost records. The webhook and the Slack sink each fired exactly once for 80% and once for 100%. |
+| 7 Rate limiting | Pass. A key with a 5 RPM limit gets 429 with `Retry-After` and `X-Ratelimit-*` headers on request 6; another tenant is unaffected. Two instances sharing Redis admit exactly 5 requests between them. |
+| 16 Tenant isolation | Pass. Tenant A's admin is denied tenant B's spend, request list, request detail, keys, cache invalidation, key creation, key revocation and chargeback. Unfiltered queries return only tenant A's data. Tenant B's admin can see its own data. |
+
+Hard-budget overshoot under concurrency: 100 runs × 40 goroutines × 5 reservations
+against Redis Lua scripts. **0 overshoots**, and every reservation was settled.
+
+Postgres store suite passed against real PostgreSQL 16 in this container
+(`GATEWAY_TEST_PG_DSN`): aggregate reconciliation, append-only audit (UPDATE/DELETE
+rejected), rollup reconciliation, and down/up migrations. The `gateway` binary also ran
+against real Redis and Postgres: chat, key creation and cost aggregation each wrote rows
+to `cost_records`, `keys` and `audit_log`.
+
+**Remaining**
+
+- OIDC single sign-on (TEN-05, SHOULD) is not implemented. Admin credentials are bearer
+  secrets from configuration.
+- Rollups are produced and verified, but the reporting API reads raw rows only, so
+  reports older than 13 months need a rollup-aware query (follow-up).
+- Budgets reset by period key; there is no carry-over or proration, and the spec asks for
+  neither.
