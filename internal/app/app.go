@@ -16,6 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/SureshKhemka/llm-gateway/internal/admin"
+	"github.com/SureshKhemka/llm-gateway/internal/cache"
 	"github.com/SureshKhemka/llm-gateway/internal/config"
 	"github.com/SureshKhemka/llm-gateway/internal/gateway"
 	"github.com/SureshKhemka/llm-gateway/internal/governance"
@@ -120,8 +121,12 @@ func New(ctx context.Context, o Options) (*App, error) {
 	if cfg.Observability.LogRequests == nil || *cfg.Observability.LogRequests {
 		sinks = append(sinks, observe.NewJSONLogger(os.Stdout))
 	}
+	var respCache cache.Store
+	if a.redis != nil {
+		respCache = cache.NewRedis(a.redis, "gw:")
+	}
 	a.Engine = gateway.NewEngine(snap, gateway.EngineOptions{Store: a.Store, Events: sinks, Log: o.Log,
-		WALDir: cfg.Storage.WALDir, Counters: counters, Factory: o.Factory})
+		WALDir: cfg.Storage.WALDir, Counters: counters, Factory: o.Factory, Cache: respCache})
 	a.Engine.Gov.WatchRevocations(ctx)
 	if err := a.Engine.Rebuild(ctx, cfg, "startup"); err != nil {
 		return nil, err

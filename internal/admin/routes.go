@@ -692,11 +692,16 @@ func (x *API) invalidateCache(w http.ResponseWriter, r *http.Request, a *Admin) 
 		return
 	}
 	req.Tenant = tenant
-	if x.Hooks.InvalidateCache == nil {
-		writeJSON(w, 200, map[string]any{"invalidated": 0})
-		return
+	var older time.Duration
+	if req.OlderThan != "" {
+		d, err := time.ParseDuration(req.OlderThan)
+		if err != nil {
+			fail(w, api.CodeInvalidRequest, "older_than must be a duration such as 24h")
+			return
+		}
+		older = d
 	}
-	n, err := x.Hooks.InvalidateCache(r.Context(), req)
+	n, err := x.Engine.InvalidateCache(r.Context(), tenant, req.Policy, req.Model, older)
 	if err != nil {
 		fail(w, api.CodeInvalidRequest, "%v", err)
 		return

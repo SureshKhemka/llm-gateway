@@ -203,6 +203,11 @@ func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm
 	diff := e.difficulty(s, rc, req, pol, dec)
 	dec.Difficulty, dec.DifficultySignals, dec.Estimator = diff.Score, diff.Signals, pol.Difficulty.Estimator
 	floor := max(diff.Tier, c.minTier)
+	if dec.Cascade {
+		// A cascade starts at the cheapest eligible deployment and escalates on failed
+		// validation instead of trusting the difficulty estimate [RTE-06].
+		floor = c.minTier
+	}
 
 	// Budget-driven degradation [RTE-08]: above a threshold the tier is capped. The cap
 	// is a strong preference, not a hard constraint — a request only a pricier
@@ -385,6 +390,9 @@ func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm
 		"max_quality": "highest_tier_within_cost", "weighted": "best_weighted_score"}[pol.Objective]
 	if len(meeting) == 0 && len(below) > 0 {
 		reason = "below_difficulty_tier"
+	}
+	if dec.Cascade {
+		reason = "cascade_start"
 	}
 	if dec.Degraded != "" {
 		reason = "budget_degraded"

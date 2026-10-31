@@ -245,3 +245,56 @@ to `cost_records`, `keys` and `audit_log`.
   reports older than 13 months need a rollup-aware query (follow-up).
 - Budgets reset by period key; there is no carry-over or proration, and the spec asks for
   neither.
+
+## M5 — Caching and cascade ✅
+
+**Shipped**
+
+- **Exact cache:** keyed on every output-affecting field (messages, model or virtual model,
+  policy@version, sampling, max tokens, stop, seed, tools, tool choice, response format,
+  penalties, reasoning effort, unknown fields). Configurable TTL.
+- **Semantic cache:** buckets share all parameters and earlier turns. The last user message
+  is embedded with the configured embeddings deployment, and a hit needs cosine ≥ the
+  policy or cache threshold plus an exact match of salient entities. There is an optional
+  judge check on semantic hits and sampling of hits for review.
+- **Backends:** Redis, shared by all instances, with size bounds per namespace and per
+  bucket; and an in-memory LRU.
+- **Scoping and cacheability:** entries are scoped to the tenant, and a shared namespace is
+  used only when both tenants opt in. Only deterministic requests are cached (temperature ≤
+  threshold, no tools unless the policy allows them, n = 1, not eval or shadow traffic).
+  Clients can send `X-Gw-Cache: bypass | refresh | no-store`.
+- **Serving hits:** hits are returned in the client's format and replayed as a stream when
+  requested; a streamed miss populates the cache. Hits bill `cache.price_usd` (default 0)
+  and record the cost avoided.
+- **Invalidation:** admin invalidation by tenant, policy, model or age
+  (`POST /admin/v1/cache/invalidate`).
+- **Cascade:** cheapest-first, with validators for JSON schema, non-empty, not truncated,
+  no refusal and an opt-in judge. Each failed validation escalates one tier, up to
+  `max_escalations`. Every attempt is recorded in the decision record, and failed attempts
+  are billed as overhead on the same request. Buffered streaming cascade is supported.
+- **Difficulty estimators:** a small-model classifier that is selectable per policy, whose
+  cost and latency are charged to the request and reported in the decision record; and a
+  k-NN similarity estimator over labelled examples. The rule-based estimator stays the
+  default.
+- **Simulator:** answers the gateway's classifier and judge prompts from its oracle.
+
+**Requirement IDs covered by tests:** CCH-01, CCH-02, CCH-03, CCH-04, CCH-05, CCH-06,
+CCH-07, CCH-08, CCH-09, RTE-03 (classifier), RTE-04, RTE-06, RTE-16 (classifier cost
+and latency), CST-01 (overhead).
+
+**Exit scenarios**
+
+| Scenario | Result |
+| --- | --- |
+| 4 Cascade | Pass. The simulator's tier-1 model returns malformed JSON for a JSON-schema request. The gateway records `qwen-4b` as `validation:json_schema`, escalates and serves `qwen-9b` (reason `cascade_escalated`). The decision record shows both attempts, and `X-Gw-Cost-Usd` equals the sum of both attempts' costs (the failed one is in `overhead_usd`). |
+| 5 Caching | Pass. Corpus replay with 20% exact repeats plus the paraphrases: **27.3% hit rate** (94 exact, 84 semantic, 0 wrong semantic answers), quality 100.00. Every hit billed $0 with cost avoided recorded. `bypass` skipped the cache and called the model; `refresh` re-populated it. |
+
+**Notes**
+
+- The semantic threshold (0.80 in the demo config) was chosen for the simulator's
+  bag-of-words embeddings. With `nomic-embed-text` on LM Studio it needs re-tuning. The
+  eval recommendations in M7 produce it.
+- The entity guard is a gateway design choice beyond the spec's wording. Without it, the
+  same replay served wrong answers on 112 of 284 semantic hits at threshold 0.85.
+- The k-NN estimator scored 97.5% tier accuracy on held-out corpus prompts, using the
+  simulator embeddings.

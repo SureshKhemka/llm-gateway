@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/SureshKhemka/llm-gateway/internal/api"
+	"github.com/SureshKhemka/llm-gateway/internal/cache"
 	"github.com/SureshKhemka/llm-gateway/internal/catalog"
 	"github.com/SureshKhemka/llm-gateway/internal/config"
 	"github.com/SureshKhemka/llm-gateway/internal/cost"
@@ -42,6 +43,7 @@ type Engine struct {
 	Factory    ProviderFactory
 	Hooks      RouteHooks
 	Estimators map[string]EstimatorFunc
+	Cache      cache.Store
 }
 
 type EngineOptions struct {
@@ -53,6 +55,7 @@ type EngineOptions struct {
 	// Counters back budgets and rate limits (Redis in production); nil = in-memory.
 	Counters governance.Counters
 	Factory  ProviderFactory
+	Cache    cache.Store
 }
 
 func NewEngine(s *Snapshot, o EngineOptions) *Engine {
@@ -80,6 +83,11 @@ func NewEngine(s *Snapshot, o EngineOptions) *Engine {
 	e.Gov = governance.NewGovernor(o.Counters, o.Log)
 	e.Discovery = NewDiscovery()
 	e.Factory = o.Factory
+	e.Cache = o.Cache
+	if e.Cache == nil {
+		e.Cache = cache.NewMemory()
+	}
+	e.Estimators = map[string]EstimatorFunc{"classifier": e.classifierEstimator, "similarity": e.similarityEstimator}
 	e.Gov.FailOpen = s.Config.Storage.BudgetsFailOpen
 	e.Gov.Alerts.SetSinks(s.Config.Alerts)
 	e.Hooks = RouteHooks{
@@ -279,6 +287,13 @@ func applyPlan(m *Meta, p *Plan) {
 	}
 }
 
+// policyFor resolves the policy a request will run under (cache keys need it before
+// routing).
+func (e *Engine) policyFor(s *Snapshot, rc *RequestContext, model string) *config.Policy {
+	pol, _ := resolvePolicy(s, rc, s.Catalog.VirtualModels[model])
+	return pol
+}
+
 // Chat serves a non-streaming chat completion.
 func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequest) (*api.ChatResponse, *Meta, error) {
 	s := e.Snapshot()
@@ -286,38 +301,100 @@ func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequ
 	if aerr := e.admit(ctx, s, rc, req, tokens.Prompt(req)); aerr != nil {
 		return nil, e.failPlan(s, rc, meta, nil, aerr), aerr
 	}
+	pol := e.policyFor(s, rc, req.Model)
+	ent, status, _, lk := e.lookupCache(ctx, s, rc, req, pol)
+	meta.CacheStatus = status
+	if ent != nil {
+		// The lookup embedding is absorbed by the gateway: hits bill exactly the cache price.
+		if resp, err := e.serveHit(s, rc, ent, status, meta); err == nil {
+			e.finish(s, rc, meta, nil, 200, "")
+			return resp, meta, nil
+		}
+	}
+	rc.overheadUSD += lk.overheadUSD
 	p, err := e.plan(s, rc, req)
 	if err != nil {
 		return nil, e.failPlan(s, rc, meta, p, err), err
 	}
 	applyPlan(meta, p)
-	var resp *api.ChatResponse
-	h, err := e.execute(ctx, s, rc, p, meta, func(ctx context.Context, d *catalog.Deployment) error {
-		var err error
-		resp, err = s.Providers.Get(d.Provider).Chat(ctx, d, req, e.timeouts(s, rc, d))
-		return err
-	})
+	resp, valid, err := e.runChat(ctx, s, rc, req, p, meta)
 	if err != nil {
 		gerr := upstreamToAPI(err)
 		return nil, e.failPlan(s, rc, meta, p, gerr), gerr
 	}
-	h.release()
-	d := h.d
-	elapsed := msSince(e.Now, h.start)
-	e.Health.Record(d.ID, true, elapsed, "")
-	e.Latency.Observe(d.ID, elapsed, 0, 0)
-	e.Pins.Set(rc, d.ID)
-	text, calls := responseText(resp)
-	u := usageFrom(req, resp.Usage, text, calls)
-	bd := cost.Of(d, rc.Start, u)
-	last := &meta.Attempts[len(meta.Attempts)-1]
-	last.CostUSD, last.LatencyMs = bd.Total(), elapsed
-	meta.Deployment, meta.Provider = d.ID, d.Provider
-	meta.Usage, meta.Cost, meta.CostUSD = u, bd, bd.Total()
-	meta.UpstreamMs, meta.TTFTMs = elapsed, elapsed
-	resp.Model = d.ID
+	if valid {
+		e.storeCache(ctx, s, rc, lk, resp, meta)
+	}
 	e.finish(s, rc, meta, p, 200, "")
 	return resp, meta, nil
+}
+
+// runChat executes the plan and, under a cascade policy, validates each answer and
+// escalates to a stronger tier on failure [RTE-06]. Every attempt's cost is billed:
+// failed cascade attempts are overhead on the same request [CST-01].
+func (e *Engine) runChat(ctx context.Context, s *Snapshot, rc *RequestContext, req *api.ChatRequest, p *Plan, meta *Meta) (*api.ChatResponse, bool, error) {
+	cascade := p.Decision != nil && p.Decision.Cascade && p.Policy != nil
+	attempts := p.Attempts
+	escalations := 0
+	for {
+		var resp *api.ChatResponse
+		sub := *p
+		sub.Attempts = attempts
+		h, err := e.execute(ctx, s, rc, &sub, meta, func(ctx context.Context, d *catalog.Deployment) error {
+			var err error
+			resp, err = s.Providers.Get(d.Provider).Chat(ctx, d, req, e.timeouts(s, rc, d))
+			return err
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		h.release()
+		d := h.d
+		elapsed := msSince(e.Now, h.start)
+		e.Health.Record(d.ID, true, elapsed, "")
+		e.Latency.Observe(d.ID, elapsed, 0, 0)
+		text, calls := responseText(resp)
+		u := usageFrom(req, resp.Usage, text, calls)
+		bd := cost.Of(d, rc.Start, u)
+		last := &meta.Attempts[len(meta.Attempts)-1]
+		last.CostUSD, last.LatencyMs = bd.Total(), elapsed
+		accept := func(valid bool) (*api.ChatResponse, bool, error) {
+			e.Pins.Set(rc, d.ID)
+			meta.Deployment, meta.Provider = d.ID, d.Provider
+			meta.Usage, meta.Cost = u, bd
+			meta.UpstreamMs, meta.TTFTMs = elapsed, elapsed
+			resp.Model = d.ID
+			return resp, valid, nil
+		}
+		if !cascade {
+			return accept(true)
+		}
+		var judgeCost float64
+		reason := e.validate(ctx, s, rc, p.Policy, req, resp, &judgeCost)
+		rc.overheadUSD += judgeCost
+		if reason == "" {
+			return accept(true)
+		}
+		last.Kind, last.Status, last.Error = "cascade", "invalid", "validation:"+reason
+		var next []*catalog.Deployment
+		for _, a := range attempts {
+			if a.Tier > d.Tier {
+				next = append(next, a)
+			}
+		}
+		if escalations >= p.Policy.Cascade.MaxEscalations || len(next) == 0 {
+			meta.RouteReason = "cascade_exhausted"
+			return accept(false)
+		}
+		escalations++
+		rc.overheadUSD += bd.Total()
+		meta.RouteReason = "cascade_escalated"
+		p.Reason = meta.RouteReason
+		if p.Decision != nil {
+			p.Decision.Reason = meta.RouteReason
+		}
+		attempts = next
+	}
 }
 
 // upstreamToAPI maps the final upstream failure to a client error.
@@ -416,7 +493,13 @@ func (e *Engine) finish(s *Snapshot, rc *RequestContext, meta *Meta, p *Plan, st
 		return
 	}
 	ctx := context.Background()
-	rc.reservation.Settle(ctx, meta.CostUSD+meta.OverheadUSD)
+	// CostUSD is the request's total: the served attempt plus overhead (failed cascade
+	// attempts, classifier, judge, embeddings) [CST-01]. Cache hits bill the cache price.
+	if meta.CacheStatus != CacheExactHit && meta.CacheStatus != CacheSemanticHit {
+		meta.OverheadUSD = rc.overheadUSD
+		meta.CostUSD = meta.Cost.Total() + meta.OverheadUSD
+	}
+	rc.reservation.Settle(ctx, meta.CostUSD)
 	rc.admission.Release(ctx, meta.Usage.TotalInput(), meta.Usage.TotalOutput())
 	if len(rc.budgets) > 0 {
 		meta.BudgetRemainingUSD = e.Gov.Remaining(ctx, rc.budgets)
@@ -480,24 +563,26 @@ func formatName(f api.Format) string {
 // content-bearing chunk, so fallback is no longer possible once the caller has it
 // [RES-04].
 type ChatStream struct {
-	e       *Engine
-	s       *Snapshot
-	rc      *RequestContext
-	req     *api.ChatRequest
-	plan    *Plan
-	dep     *catalog.Deployment
-	up      provider.Stream
-	Meta    *Meta
-	start   time.Time
-	buf     []*api.ChatChunk
-	text    strings.Builder
-	calls   map[int]*api.ToolCall
-	usage   *api.Usage
-	finish  string
-	done    bool
-	closed  bool
-	FailErr error
-	release func()
+	e        *Engine
+	s        *Snapshot
+	rc       *RequestContext
+	req      *api.ChatRequest
+	plan     *Plan
+	dep      *catalog.Deployment
+	up       provider.Stream
+	Meta     *Meta
+	start    time.Time
+	buf      []*api.ChatChunk
+	text     strings.Builder
+	calls    map[int]*api.ToolCall
+	usage    *api.Usage
+	finish   string
+	done     bool
+	closed   bool
+	FailErr  error
+	release  func()
+	lookup   *cacheLookup
+	replayed bool
 }
 
 // FinishReason returns the upstream finish reason seen so far.
@@ -577,7 +662,8 @@ func (cs *ChatStream) absorb(ch *api.ChatChunk) bool {
 }
 
 // ChatStream opens a streaming chat completion, falling back across the plan until a
-// deployment produces its first token.
+// deployment produces its first token. Cache hits and buffered cascades are replayed as
+// a stream [CCH-05, RTE-06].
 func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.ChatRequest) (*ChatStream, error) {
 	s := e.Snapshot()
 	meta := e.newMeta(rc, req.Model)
@@ -585,13 +671,38 @@ func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.Ch
 		e.failPlan(s, rc, meta, nil, aerr)
 		return &ChatStream{Meta: meta}, aerr
 	}
+	pol := e.policyFor(s, rc, req.Model)
+	ent, status, _, lk := e.lookupCache(ctx, s, rc, req, pol)
+	meta.CacheStatus = status
+	cs := &ChatStream{e: e, s: s, rc: rc, req: req, Meta: meta, lookup: lk}
+	if ent != nil {
+		if resp, err := e.serveHit(s, rc, ent, status, meta); err == nil {
+			cs.replay(resp, ent.Deployment, nil)
+			return cs, nil
+		}
+	}
+	rc.overheadUSD += lk.overheadUSD
 	p, err := e.plan(s, rc, req)
 	if err != nil {
 		e.failPlan(s, rc, meta, p, err)
 		return &ChatStream{Meta: meta}, err
 	}
 	applyPlan(meta, p)
-	cs := &ChatStream{e: e, s: s, rc: rc, req: req, plan: p, Meta: meta}
+	cs.plan = p
+	if p.Decision != nil && p.Decision.Cascade {
+		// Buffered cascade: produce and validate the whole answer, then stream it.
+		resp, valid, err := e.runChat(ctx, s, rc, req, p, meta)
+		if err != nil {
+			gerr := upstreamToAPI(err)
+			e.failPlan(s, rc, meta, p, gerr)
+			return &ChatStream{Meta: meta}, gerr
+		}
+		if valid {
+			e.storeCache(ctx, s, rc, lk, resp, meta)
+		}
+		cs.replay(resp, meta.Deployment, p)
+		return cs, nil
+	}
 	h, err := e.execute(ctx, s, rc, p, meta, func(ctx context.Context, d *catalog.Deployment) error {
 		cs.start = e.Now()
 		return cs.open(ctx, d)
@@ -604,6 +715,13 @@ func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.Ch
 	cs.release = h.release
 	meta.Deployment, meta.Provider = h.d.ID, h.d.Provider
 	return cs, nil
+}
+
+// replay turns a complete response into the stream's buffer; billing is already in Meta.
+func (cs *ChatStream) replay(resp *api.ChatResponse, model string, p *Plan) {
+	cs.buf = replayChunks(resp, model)
+	cs.replayed = true
+	cs.plan = p
 }
 
 // Recv returns the next chunk for the client; io.EOF at the end. After an upstream
@@ -655,7 +773,19 @@ func (cs *ChatStream) Usage() cost.Usage {
 // Close finishes billing and records the request. clientErr is non-nil when the client
 // went away before the end.
 func (cs *ChatStream) Close(clientErr error) *Meta {
-	if cs.closed || cs.up == nil {
+	if cs.closed {
+		return cs.Meta
+	}
+	if cs.replayed {
+		cs.closed = true
+		status, code := 200, ""
+		if clientErr != nil {
+			status, code = 499, "client_closed"
+		}
+		cs.e.finish(cs.s, cs.rc, cs.Meta, cs.plan, status, code)
+		return cs.Meta
+	}
+	if cs.up == nil {
 		return cs.Meta
 	}
 	cs.closed = true
@@ -666,7 +796,6 @@ func (cs *ChatStream) Close(clientErr error) *Meta {
 	m := cs.Meta
 	m.Usage = cs.Usage()
 	m.Cost = cost.Of(cs.dep, cs.rc.Start, m.Usage)
-	m.CostUSD = m.Cost.Total()
 	m.UpstreamMs = msSince(cs.e.Now, cs.start)
 	switch {
 	case clientErr == nil && cs.FailErr == nil:
@@ -680,7 +809,10 @@ func (cs *ChatStream) Close(clientErr error) *Meta {
 		cs.e.Health.Release(cs.dep.ID)
 	}
 	last := &m.Attempts[len(m.Attempts)-1]
-	last.CostUSD, last.LatencyMs, last.TTFTMs = m.CostUSD, m.UpstreamMs, m.TTFTMs
+	last.CostUSD, last.LatencyMs, last.TTFTMs = m.Cost.Total(), m.UpstreamMs, m.TTFTMs
+	if clientErr == nil && cs.FailErr == nil && cs.finish != "length" {
+		cs.e.storeCache(context.Background(), cs.s, cs.rc, cs.lookup, cs.assembled(), m)
+	}
 	status, code := 200, ""
 	switch {
 	case clientErr != nil:
@@ -692,6 +824,20 @@ func (cs *ChatStream) Close(clientErr error) *Meta {
 	}
 	cs.e.finish(cs.s, cs.rc, m, cs.plan, status, code)
 	return m
+}
+
+// assembled rebuilds a complete response from a finished stream (for the cache).
+func (cs *ChatStream) assembled() *api.ChatResponse {
+	msg := api.Message{Role: "assistant", Content: api.TextContent(cs.text.String())}
+	for i := 0; i < len(cs.calls); i++ {
+		if c, ok := cs.calls[i]; ok {
+			msg.ToolCalls = append(msg.ToolCalls, *c)
+		}
+	}
+	u := cs.Usage()
+	return &api.ChatResponse{ID: cs.rc.ID, Object: "chat.completion", Created: cs.rc.Start.Unix(), Model: cs.dep.ID,
+		Choices: []api.Choice{{Message: msg, FinishReason: cs.finish}},
+		Usage:   &api.Usage{PromptTokens: u.TotalInput(), CompletionTokens: u.TotalOutput(), TotalTokens: u.TotalInput() + u.TotalOutput()}}
 }
 
 // ---------- embeddings ----------

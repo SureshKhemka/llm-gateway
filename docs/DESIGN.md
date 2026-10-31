@@ -291,11 +291,36 @@ the policy allows, and not `no-cache` [CCH-04]. Semantic: embed the last user me
 system prompt via the embeddings deployment; per tenant+policy+param-hash bucket, cosine
 similarity over stored vectors (bounded count per bucket, LRU) ≥ threshold [CCH-02].
 Cross-tenant sharing only when both tenants set `cache.shared: true` (shared namespace)
-[CCH-03]. Hits are re-encoded to the client format and streamed when requested [CCH-05];
+[CCH-03]. **Entity guard:** a semantic candidate is only a hit when the prompts carry the
+same salient tokens (numbers, quoted strings, mid-sentence capitalised words). Templated
+prompts that differ only in an invoice number or a name embed almost identically but need
+different answers. In the reference replay this guard took wrong semantic hits from 112
+to 0 at threshold 0.85 [CCH-09]. A request without `temperature` is assumed to run at
+`cache.default_temperature` (1.0, the provider default) and is not cached. Hits are re-encoded to the client format and streamed when requested [CCH-05];
 billed at `cache.price_usd` (default 0) with cost avoided = estimated cost on the routed
 deployment [CCH-06]. `x-gw-cache: bypass|refresh` [CCH-07]. Admin invalidation by tenant /
 policy / model / age; size bounded by max entries + TTL [CCH-08]. Optional judge check and
 hit sampling into `cache_samples` [CCH-09].
+
+### Cascade (as implemented) [RTE-06]
+
+A cascade policy ignores the difficulty estimate and orders candidates cheapest-first. After
+each answer the validators run in order: `json_schema` (schema or JSON validity when
+`response_format` asks for it), `non_empty`, `not_truncated` (finish reason `length`),
+`no_refusal` (refusal field, `content_filter`, or a refusal opener), and optionally `judge`
+(a judge deployment scores 0–10; below `judge_min_score`×10 fails). On failure the attempt
+is recorded as `cascade/invalid`, its cost becomes overhead, and execution continues with
+candidates of a higher tier (≤ `max_escalations`). When escalations run out, the last
+answer is returned with reason `cascade_exhausted` and is not cached. Streaming requests
+cascade only with `buffer_streams: true`: the validated answer is replayed as a stream.
+
+### Cost convention
+
+`X-Gw-Cost-Usd` and `cost_records.cost_usd` are the request's total. That is the served
+attempt's token cost (split into input, cached input, output and reasoning) plus
+`overhead_usd`: failed cascade attempts, classifier and judge calls, and the semantic-cache
+lookup embedding on a miss. A cache hit bills exactly `cache.price_usd`; the gateway
+absorbs that hit's lookup embedding [CST-01, CCH-06].
 
 ## 11. Observability [OBS-*]
 

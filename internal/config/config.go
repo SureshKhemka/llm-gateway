@@ -391,17 +391,19 @@ type AlertSink struct {
 }
 
 type Cache struct {
-	Enabled              bool     `yaml:"enabled" json:"enabled,omitempty"`
-	TTL                  Duration `yaml:"ttl" json:"ttl,omitempty"`
-	MaxEntries           int      `yaml:"max_entries" json:"max_entries,omitempty"`
-	MaxTemperature       float64  `yaml:"max_temperature" json:"max_temperature,omitempty"`
-	Semantic             bool     `yaml:"semantic" json:"semantic,omitempty"`
-	SemanticThreshold    float64  `yaml:"semantic_threshold" json:"semantic_threshold,omitempty"`
-	Embedder             string   `yaml:"embedder" json:"embedder,omitempty"`
-	PriceUSD             float64  `yaml:"price_usd" json:"price_usd,omitempty"`
-	JudgeHits            string   `yaml:"judge_hits" json:"judge_hits,omitempty"` // deployment to verify semantic hits [CCH-09]
-	SampleRate           float64  `yaml:"sample_rate" json:"sample_rate,omitempty"`
-	MaxSemanticPerBucket int      `yaml:"max_semantic_per_bucket" json:"max_semantic_per_bucket,omitempty"`
+	Enabled        bool     `yaml:"enabled" json:"enabled,omitempty"`
+	TTL            Duration `yaml:"ttl" json:"ttl,omitempty"`
+	MaxEntries     int      `yaml:"max_entries" json:"max_entries,omitempty"`
+	MaxTemperature float64  `yaml:"max_temperature" json:"max_temperature,omitempty"`
+	// DefaultTemperature is assumed when a request sets none (providers default to ~1).
+	DefaultTemperature   float64 `yaml:"default_temperature" json:"default_temperature,omitempty"`
+	Semantic             bool    `yaml:"semantic" json:"semantic,omitempty"`
+	SemanticThreshold    float64 `yaml:"semantic_threshold" json:"semantic_threshold,omitempty"`
+	Embedder             string  `yaml:"embedder" json:"embedder,omitempty"`
+	PriceUSD             float64 `yaml:"price_usd" json:"price_usd,omitempty"`
+	JudgeHits            string  `yaml:"judge_hits" json:"judge_hits,omitempty"` // deployment to verify semantic hits [CCH-09]
+	SampleRate           float64 `yaml:"sample_rate" json:"sample_rate,omitempty"`
+	MaxSemanticPerBucket int     `yaml:"max_semantic_per_bucket" json:"max_semantic_per_bucket,omitempty"`
 }
 
 type Guardrails struct {
@@ -712,6 +714,9 @@ func ApplyDefaults(c *Config) {
 	}
 	if c.Cache.MaxTemperature == 0 {
 		c.Cache.MaxTemperature = 0.3
+	}
+	if c.Cache.DefaultTemperature == 0 {
+		c.Cache.DefaultTemperature = 1
 	}
 	if c.Cache.SemanticThreshold == 0 {
 		c.Cache.SemanticThreshold = 0.92

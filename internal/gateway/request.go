@@ -57,6 +57,7 @@ type RequestContext struct {
 	reservation *governance.Reservation
 	admission   *governance.Admission
 	maxOutCap   int
+	overheadUSD float64
 }
 
 func (rc *RequestContext) EndUser() string { return rc.Hints.EndUser }

@@ -353,7 +353,60 @@ type answer struct {
 	Refusal   bool
 }
 
+func systemText(msgs []api.Message) string {
+	var parts []string
+	for _, m := range msgs {
+		if m.Role == "system" || m.Role == "developer" {
+			parts = append(parts, m.Content.PlainText())
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// gatewayRole answers the gateway's own classifier and judge prompts: the classifier
+// returns the oracle difficulty (or a length heuristic); the judge scores 9 when the
+// response contains the oracle reference and 2 otherwise.
+func (in *Instance) gatewayRole(req *api.ChatRequest) (string, bool) {
+	sys := systemText(req.Messages)
+	user := lastUser(req.Messages)
+	switch {
+	case strings.Contains(sys, "difficulty classifier"):
+		in.mu.RLock()
+		it, ok := in.oracle[OracleKey(user)]
+		in.mu.RUnlock()
+		if ok {
+			return fmt.Sprint(it.Difficulty), true
+		}
+		n := len(strings.Fields(user))
+		switch {
+		case n < 8:
+			return "0", true
+		case n < 40:
+			return "1", true
+		case n < 150:
+			return "2", true
+		}
+		return "3", true
+	case strings.Contains(sys, "You are a grader"):
+		reqText, respText, _ := strings.Cut(strings.TrimPrefix(user, "REQUEST:\n"), "\n\nRESPONSE:\n")
+		in.mu.RLock()
+		it, ok := in.oracle[OracleKey(reqText)]
+		in.mu.RUnlock()
+		if ok && strings.Contains(strings.ToLower(respText), strings.ToLower(it.Reference)) {
+			return "9", true
+		}
+		if !ok && strings.TrimSpace(respText) != "" {
+			return "7", true
+		}
+		return "2", true
+	}
+	return "", false
+}
+
 func (in *Instance) answerFor(m *Model, req *api.ChatRequest, f Faults) answer {
+	if out, ok := in.gatewayRole(req); ok {
+		return answer{Text: out, Finish: "stop"}
+	}
 	prompt := lastUser(req.Messages)
 	if f.Refuse {
 		return answer{Text: "I'm sorry, but I can't help with that request.", Finish: "stop", Refusal: true}

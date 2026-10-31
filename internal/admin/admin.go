@@ -78,15 +78,8 @@ type API struct {
 	Engine *gateway.Engine
 	// Reload re-reads configuration files and rebuilds the snapshot (config apply).
 	Reload func(ctx context.Context, reason string) error
-	// Extra hooks wired by later subsystems (cache, evals, policies).
-	Hooks Hooks
-	mux   *http.ServeMux
-	route []Route
-}
-
-// Hooks let other subsystems register admin functionality.
-type Hooks struct {
-	InvalidateCache func(ctx context.Context, f CacheInvalidation) (int, error)
+	mux    *http.ServeMux
+	route  []Route
 }
 
 type CacheInvalidation struct {

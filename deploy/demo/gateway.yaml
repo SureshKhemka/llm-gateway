@@ -5,6 +5,14 @@ server:
   drain_timeout: 20s
   reload_every: 2s
 
+cache:
+  enabled: true
+  ttl: 1h
+  semantic: true
+  semantic_threshold: 0.80   # tune with the eval recommendations (EVL-07)
+  embedder: sima/nomic-embed
+  price_usd: 0
+
 resilience:
   breaker:
     min_requests: 5
