@@ -38,6 +38,9 @@ func (s *Server) prepareChat(w http.ResponseWriter, r *http.Request, endpoint st
 		hints.EndUser = req.User
 	}
 	rc.Hints = hints
+	if e := s.Shed(p, hints.Priority); e != nil {
+		return rc, nil, e
+	}
 	return rc, &req, nil
 }
 

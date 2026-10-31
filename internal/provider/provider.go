@@ -43,6 +43,8 @@ const (
 	KindAuth          Kind = "auth"
 	KindProtocol      Kind = "protocol"
 	KindCanceled      Kind = "canceled"
+	// KindUnavailable: the provider does not have the model (e.g. unloaded in LM Studio).
+	KindUnavailable Kind = "model_unavailable"
 )
 
 type UpstreamError struct {
@@ -62,7 +64,7 @@ func (e *UpstreamError) Error() string {
 // Retriable reports whether another candidate (or a retry) may succeed.
 func (e *UpstreamError) Retriable() bool {
 	switch e.Kind {
-	case KindConnect, KindTimeout, KindRateLimited, KindServer, KindContextLength, KindProtocol:
+	case KindConnect, KindTimeout, KindRateLimited, KindServer, KindContextLength, KindProtocol, KindUnavailable, KindAuth:
 		return true
 	}
 	return false
@@ -71,7 +73,7 @@ func (e *UpstreamError) Retriable() bool {
 // CountsAgainstHealth reports whether the failure says something about the deployment.
 func (e *UpstreamError) CountsAgainstHealth() bool {
 	switch e.Kind {
-	case KindConnect, KindTimeout, KindServer, KindRateLimited, KindProtocol, KindAuth:
+	case KindConnect, KindTimeout, KindServer, KindRateLimited, KindProtocol, KindAuth, KindUnavailable:
 		return true
 	}
 	return false
@@ -107,6 +109,9 @@ func ClassifyHTTP(status int, header http.Header, msg string) *UpstreamError {
 		e.Kind = KindServer
 	case status == http.StatusRequestTimeout:
 		e.Kind = KindTimeout
+	case status == http.StatusNotFound:
+		// The gateway picked the model, so a missing model is the deployment's fault.
+		e.Kind = KindUnavailable
 	default:
 		e.Kind = KindClient
 	}

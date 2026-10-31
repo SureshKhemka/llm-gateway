@@ -15,6 +15,7 @@ import (
 	"github.com/SureshKhemka/llm-gateway/internal/cost"
 	"github.com/SureshKhemka/llm-gateway/internal/observe"
 	"github.com/SureshKhemka/llm-gateway/internal/provider"
+	"github.com/SureshKhemka/llm-gateway/internal/resilience"
 	"github.com/SureshKhemka/llm-gateway/internal/store"
 	"github.com/SureshKhemka/llm-gateway/internal/tokens"
 )
@@ -32,6 +33,9 @@ type Engine struct {
 	Log        *slog.Logger
 	Now        func() time.Time
 	Latency    *LatencyTracker
+	Health     *resilience.Tracker
+	Limiter    *resilience.Limiter
+	Pins       *Pins
 	Hooks      RouteHooks
 	Estimators map[string]EstimatorFunc
 }
@@ -59,14 +63,36 @@ func NewEngine(s *Snapshot, o EngineOptions) *Engine {
 	}
 	e := &Engine{Store: o.Store, Events: o.Events, Log: o.Log, Now: o.Now,
 		Writer:  store.NewWriter(o.Store, o.WALDir, time.Second, o.Log),
-		Latency: NewLatencyTracker(s.Config.Resilience.LatencyAlpha)}
+		Latency: NewLatencyTracker(s.Config.Resilience.LatencyAlpha),
+		Health:  resilience.NewTracker(BreakerConfig(s)),
+		Limiter: resilience.NewLimiter(),
+		Pins:    NewPins(30 * time.Minute)}
+	e.Hooks = RouteHooks{
+		Health: func(dep string) (string, bool) {
+			h, ok := e.Health.Available(dep)
+			return string(h), ok
+		},
+		InFlight: e.Limiter.InFlight,
+		Pinned:   e.Pins.Get,
+		Cold:     e.Health.Cold,
+	}
 	e.snap.Store(s)
 	return e
 }
 
+// BreakerConfig derives breaker thresholds from a snapshot's configuration.
+func BreakerConfig(s *Snapshot) resilience.BreakerConfig {
+	b := s.Config.Resilience.Breaker
+	return resilience.BreakerConfig{Window: b.Window.D(), MinRequests: b.MinRequests, ErrorRate: b.ErrorRate,
+		LatencyP95Ms: b.LatencyP95Ms, CoolDown: b.CoolDown.D(), Consecutive: b.Consecutive}
+}
+
 func (e *Engine) Snapshot() *Snapshot { return e.snap.Load() }
-func (e *Engine) Swap(s *Snapshot)    { e.snap.Store(s) }
-func (e *Engine) Close()              { e.Writer.Close() }
+func (e *Engine) Swap(s *Snapshot) {
+	e.snap.Store(s)
+	e.Health.SetConfig(BreakerConfig(s))
+}
+func (e *Engine) Close() { e.Writer.Close() }
 
 // Plan is the ordered list of deployments to try plus the decision that produced it.
 type Plan struct {
@@ -203,39 +229,33 @@ func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequ
 		return nil, e.failPlan(s, rc, meta, p, err), err
 	}
 	applyPlan(meta, p)
-	var lastErr error
-	for i, d := range p.Attempts {
-		kind := "primary"
-		if i > 0 {
-			kind = "fallback"
-		}
-		start := e.Now()
-		resp, err := s.Providers.Get(d.Provider).Chat(ctx, d, req, e.timeouts(s, rc, d))
-		elapsed := msSince(e.Now, start)
-		if err != nil {
-			ue := provider.AsUpstream(err)
-			meta.Attempts = append(meta.Attempts, observe.Attempt{Deployment: d.ID, Provider: d.Provider, Kind: kind, Status: "error", Error: string(ue.Kind), LatencyMs: elapsed})
-			lastErr = err
-			if !ue.Retriable() {
-				break
-			}
-			continue
-		}
-		text, calls := responseText(resp)
-		u := usageFrom(req, resp.Usage, text, calls)
-		e.Latency.Observe(d.ID, elapsed, 0, 0)
-		bd := cost.Of(d, rc.Start, u)
-		meta.Attempts = append(meta.Attempts, observe.Attempt{Deployment: d.ID, Provider: d.Provider, Kind: kind, Status: "ok", CostUSD: bd.Total(), LatencyMs: elapsed})
-		meta.Deployment, meta.Provider = d.ID, d.Provider
-		meta.Usage, meta.Cost, meta.CostUSD = u, bd, bd.Total()
-		meta.UpstreamMs, meta.TTFTMs = elapsed, elapsed
-		meta.FallbackAttempts = i
-		resp.Model = d.ID
-		e.finish(s, rc, meta, p, 200, "")
-		return resp, meta, nil
+	var resp *api.ChatResponse
+	h, err := e.execute(ctx, s, rc, p, meta, func(ctx context.Context, d *catalog.Deployment) error {
+		var err error
+		resp, err = s.Providers.Get(d.Provider).Chat(ctx, d, req, e.timeouts(s, rc, d))
+		return err
+	})
+	if err != nil {
+		gerr := upstreamToAPI(err)
+		return nil, e.failPlan(s, rc, meta, p, gerr), gerr
 	}
-	gerr := upstreamToAPI(lastErr)
-	return nil, e.failPlan(s, rc, meta, p, gerr), gerr
+	h.release()
+	d := h.d
+	elapsed := msSince(e.Now, h.start)
+	e.Health.Record(d.ID, true, elapsed, "")
+	e.Latency.Observe(d.ID, elapsed, 0, 0)
+	e.Pins.Set(rc, d.ID)
+	text, calls := responseText(resp)
+	u := usageFrom(req, resp.Usage, text, calls)
+	bd := cost.Of(d, rc.Start, u)
+	last := &meta.Attempts[len(meta.Attempts)-1]
+	last.CostUSD, last.LatencyMs = bd.Total(), elapsed
+	meta.Deployment, meta.Provider = d.ID, d.Provider
+	meta.Usage, meta.Cost, meta.CostUSD = u, bd, bd.Total()
+	meta.UpstreamMs, meta.TTFTMs = elapsed, elapsed
+	resp.Model = d.ID
+	e.finish(s, rc, meta, p, 200, "")
+	return resp, meta, nil
 }
 
 // upstreamToAPI maps the final upstream failure to a client error.
@@ -403,6 +423,7 @@ type ChatStream struct {
 	done    bool
 	closed  bool
 	FailErr error
+	release func()
 }
 
 // FinishReason returns the upstream finish reason seen so far.
@@ -493,29 +514,18 @@ func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.Ch
 	}
 	applyPlan(meta, p)
 	cs := &ChatStream{e: e, s: s, rc: rc, req: req, plan: p, Meta: meta}
-	var lastErr error
-	for i, d := range p.Attempts {
-		kind := "primary"
-		if i > 0 {
-			kind = "fallback"
-		}
+	h, err := e.execute(ctx, s, rc, p, meta, func(ctx context.Context, d *catalog.Deployment) error {
 		cs.start = e.Now()
-		if err := cs.open(ctx, d); err != nil {
-			ue := provider.AsUpstream(err)
-			meta.Attempts = append(meta.Attempts, observe.Attempt{Deployment: d.ID, Provider: d.Provider, Kind: kind, Status: "error", Error: string(ue.Kind), LatencyMs: msSince(e.Now, cs.start)})
-			lastErr = err
-			if !ue.Retriable() {
-				break
-			}
-			continue
-		}
-		meta.Attempts = append(meta.Attempts, observe.Attempt{Deployment: d.ID, Provider: d.Provider, Kind: kind, Status: "ok"})
-		meta.Deployment, meta.Provider, meta.FallbackAttempts = d.ID, d.Provider, i
-		return cs, nil
+		return cs.open(ctx, d)
+	})
+	if err != nil {
+		gerr := upstreamToAPI(err)
+		e.failPlan(s, rc, meta, p, gerr)
+		return &ChatStream{Meta: meta}, gerr
 	}
-	gerr := upstreamToAPI(lastErr)
-	e.failPlan(s, rc, meta, p, gerr)
-	return &ChatStream{Meta: meta}, gerr
+	cs.release = h.release
+	meta.Deployment, meta.Provider = h.d.ID, h.d.Provider
+	return cs, nil
 }
 
 // Recv returns the next chunk for the client; io.EOF at the end. After an upstream
@@ -572,13 +582,24 @@ func (cs *ChatStream) Close(clientErr error) *Meta {
 	}
 	cs.closed = true
 	cs.up.Close()
+	if cs.release != nil {
+		cs.release()
+	}
 	m := cs.Meta
 	m.Usage = cs.Usage()
 	m.Cost = cost.Of(cs.dep, cs.rc.Start, m.Usage)
 	m.CostUSD = m.Cost.Total()
 	m.UpstreamMs = msSince(cs.e.Now, cs.start)
-	if clientErr == nil && cs.FailErr == nil {
+	switch {
+	case clientErr == nil && cs.FailErr == nil:
 		cs.e.Latency.Observe(cs.dep.ID, m.TTFTMs, m.Usage.TotalOutput(), m.UpstreamMs-m.TTFTMs)
+		cs.e.Health.Record(cs.dep.ID, true, m.TTFTMs, "")
+		cs.e.Pins.Set(cs.rc, cs.dep.ID)
+	case cs.FailErr != nil:
+		ue := provider.AsUpstream(cs.FailErr)
+		cs.e.Health.Record(cs.dep.ID, !ue.CountsAgainstHealth(), m.UpstreamMs, "mid-stream: "+ue.Message)
+	default:
+		cs.e.Health.Release(cs.dep.ID)
 	}
 	last := &m.Attempts[len(m.Attempts)-1]
 	last.CostUSD, last.LatencyMs, last.TTFTMs = m.CostUSD, m.UpstreamMs, m.TTFTMs

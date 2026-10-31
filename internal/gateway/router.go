@@ -24,6 +24,8 @@ type RouteHooks struct {
 	Pinned func(rc *RequestContext) string
 	// InFlight returns current in-flight requests per deployment (pool balancing).
 	InFlight func(dep string) int
+	// Cold reports a local deployment whose model is not loaded [PRV-10].
+	Cold func(dep string) bool
 }
 
 // resolvePolicy applies precedence [RTE-09]: for the generic virtual model "auto" the
@@ -317,6 +319,31 @@ func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm
 		return err
 	}
 
+	// Latency-sensitive requests never go to a cold deployment while a warm eligible one
+	// exists [PRV-10].
+	if c.latencyTarget != nil && e.Hooks.Cold != nil {
+		isCold := func(r ranked) bool { return !r.d.Warm || e.Hooks.Cold(r.d.ID) }
+		warm := 0
+		for _, r := range append(append([]ranked(nil), meeting...), below...) {
+			if !isCold(r) {
+				warm++
+			}
+		}
+		if warm > 0 {
+			filter := func(rs []ranked) []ranked {
+				var out []ranked
+				for _, r := range rs {
+					if isCold(r) {
+						dec.Exclusions = append(dec.Exclusions, Exclusion{Deployment: r.d.ID, Reasons: []string{"cold"}})
+					} else {
+						out = append(out, r)
+					}
+				}
+				return out
+			}
+			meeting, below = filter(meeting), filter(below)
+		}
+	}
 	// Latency target: drop candidates that miss it, unless none would remain [RTE-05].
 	if c.latencyTarget != nil {
 		var ok []ranked

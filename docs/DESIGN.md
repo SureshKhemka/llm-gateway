@@ -231,10 +231,18 @@ for attempt in ordered list (≤ max_attempts, within total deadline):
 ```
 
 Fallback candidates come from the same filtered set, so hard constraints are never
-relaxed [RES-08]. Health: each deployment has a rolling window of outcomes and latency,
-plus active probes; state healthy/degraded/unhealthy [RES-01]. Breaker: closed → open when
-error rate or p95 latency over the window exceeds thresholds (min volume), → half-open
-after cool-down admitting one probe [RES-02]. Streaming: the first chunk is awaited
+relaxed [RES-08]. Switching to a different candidate happens immediately; retrying the
+same deployment (a single-candidate plan, or a second pass over the list) waits a
+jittered exponential backoff, never less than the upstream's `Retry-After` [RES-05].
+Upstream 404 for the chosen model (an unloaded LM Studio model) and 401/403 (a bad
+provider key) are deployment faults: they fall back and count against health.
+Health: each deployment has a rolling window of outcomes and latency, plus active probes
+of `/v1/models` every 15 s (unreachable → unhealthy; reachable but model not listed →
+unhealthy and *cold*); state healthy/degraded/unhealthy [RES-01, PRV-10]. Breaker: closed →
+open when, over the window, the error rate or p95 latency exceeds its threshold (with a
+minimum volume) or after N consecutive failures; → half-open after the cool-down, which
+admits exactly one probe request; success closes, failure re-opens [RES-02]. Routing reads
+breaker state without side effects; the executor takes the half-open probe slot. Streaming: the first chunk is awaited
 before headers are written; after that a failure ends the stream with a well-formed
 error event and bills delivered tokens (counted locally when usage is missing) [RES-04,
 API-11, API-13]. Client disconnect cancels the upstream context [API-11]. Load shedding:

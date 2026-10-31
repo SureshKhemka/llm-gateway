@@ -171,6 +171,7 @@ func (a *App) background(ctx context.Context) {
 func (a *App) Serve(ctx context.Context) error {
 	cfg := a.Engine.Snapshot().Config
 	go a.background(ctx)
+	go a.Engine.RunProbes(ctx, 15*time.Second)
 	srv := &http.Server{Addr: cfg.Server.Listen, Handler: a.Server.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() {

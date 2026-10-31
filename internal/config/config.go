@@ -391,6 +391,7 @@ type Breaker struct {
 	ErrorRate    float64  `yaml:"error_rate"`
 	LatencyP95Ms float64  `yaml:"latency_p95_ms"`
 	CoolDown     Duration `yaml:"cool_down"`
+	Consecutive  int      `yaml:"consecutive_failures"`
 }
 
 type Resilience struct {

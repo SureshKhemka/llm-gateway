@@ -69,15 +69,25 @@ class Stack:
         e.update(self.extra_env)
         return e
 
+    def start_sim(self, name):
+        port = self.sima_port if name == "sima" else self.simb_port
+        args = [str(BIN / "simprovider"), "-instance", f"{name}=127.0.0.1:{port}"]
+        oracle = ROOT / "testdata/corpus/corpus.jsonl"
+        if oracle.exists():
+            args += ["-oracle", str(oracle)]
+        self.sims[name] = subprocess.Popen(args, env=self.env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        wait_http((self.sima if name == "sima" else self.simb) + "/v1/models")
+
+    def kill_sim(self, name):
+        p = self.sims.pop(name)
+        p.kill()
+        p.wait()
+
     def start(self):
         env = self.env()
-        oracle = ROOT / "testdata/corpus/corpus.jsonl"
-        sim_args = [str(BIN / "simprovider"), "-instance", f"sima=127.0.0.1:{self.sima_port}",
-                    "-instance", f"simb=127.0.0.1:{self.simb_port}"]
-        if oracle.exists():
-            sim_args += ["-oracle", str(oracle)]
-        self.procs.append(subprocess.Popen(sim_args, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        wait_http(self.sima + "/v1/models")
+        self.sims = {}
+        for name in ("sima", "simb"):
+            self.start_sim(name)
         self.log = open(os.path.join(self.tmp, "gateway.log"), "w")
         self.procs.append(subprocess.Popen([str(BIN / "gateway"), "-config", self.config], env=env,
                                            stdout=self.log, stderr=subprocess.STDOUT))
@@ -85,7 +95,7 @@ class Stack:
         return self
 
     def stop(self):
-        for p in reversed(self.procs):
+        for p in list(self.sims.values()) + list(reversed(self.procs)):
             p.terminate()
             try:
                 p.wait(10)
@@ -93,16 +103,25 @@ class Stack:
                 p.kill()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def sim_faults(self, instance, faults, model=""):
+    def sim(self, instance, method, path, body=None):
         import json
         base = self.sima if instance == "sima" else self.simb
-        req = urllib.request.Request(base + "/_sim/faults", data=json.dumps({"model": model, "faults": faults}).encode(),
-                                     headers={"Content-Type": "application/json"}, method="POST")
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(base + path, data=data, headers={"Content-Type": "application/json"}, method=method)
         urllib.request.urlopen(req).read()
+
+    def sim_faults(self, instance, faults, model=""):
+        self.sim(instance, "POST", "/_sim/faults", {"model": model, "faults": faults})
+
+    def clear_faults(self):
+        for name in ("sima", "simb"):
+            if name in self.sims:
+                self.sim(name, "DELETE", "/_sim/faults")
 
 
 @pytest.fixture(scope="session")
 def stack():
+    """Session-wide stack. Scenarios that break things restore them before returning."""
     if os.environ.get("GATEWAY_URL"):
         s = Stack()
         s.url = os.environ["GATEWAY_URL"]

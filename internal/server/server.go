@@ -13,7 +13,6 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,7 +31,6 @@ type Server struct {
 
 	inFlight atomic.Int64
 	draining atomic.Bool
-	wg       sync.WaitGroup
 }
 
 func New(e *gateway.Engine, log *slog.Logger) *Server {
@@ -62,13 +60,14 @@ func (s *Server) InFlight() int64 { return s.inFlight.Load() }
 // track counts in-flight requests for draining and load shedding.
 func (s *Server) track(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Count first, then check: Drain sets draining before it starts waiting, so any
+		// request that saw draining=false is already counted.
+		s.inFlight.Add(1)
+		defer s.inFlight.Add(-1)
 		if s.draining.Load() {
 			api.WriteError(w, formatOf(r), api.NewError(api.CodeOverloaded, "gateway is shutting down"))
 			return
 		}
-		s.wg.Add(1)
-		s.inFlight.Add(1)
-		defer func() { s.inFlight.Add(-1); s.wg.Done() }()
 		h(w, r)
 	}
 }
@@ -76,14 +75,16 @@ func (s *Server) track(h http.HandlerFunc) http.HandlerFunc {
 // Drain stops accepting requests and waits for in-flight ones up to ctx [RES-10].
 func (s *Server) Drain(ctx context.Context) error {
 	s.draining.Store(true)
-	done := make(chan struct{})
-	go func() { s.wg.Wait(); close(done) }()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	t := time.NewTicker(10 * time.Millisecond)
+	defer t.Stop()
+	for s.inFlight.Load() > 0 {
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	return nil
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
@@ -147,6 +148,33 @@ func (s *Server) Authenticate(r *http.Request, endpoint string) (*governance.Pri
 		return nil, api.NewError(api.CodeForbidden, "client address not allowed for this key")
 	}
 	return p, nil
+}
+
+// Shed rejects a request when the gateway itself is saturated, lower-priority keys
+// first [RES-09]: priority 0 keys are shed at 80% of max_in_flight, priority 1 at 90%,
+// higher priorities only at 100%.
+func (s *Server) Shed(p *governance.Principal, hintPriority *int) *api.Error {
+	max := s.Engine.Snapshot().Config.Server.MaxInFlight
+	if max <= 0 {
+		return nil
+	}
+	prio := p.Scopes.Priority
+	if hintPriority != nil && *hintPriority < prio {
+		prio = *hintPriority // hints may only lower priority [RTE-10]
+	}
+	frac := 1.0
+	switch {
+	case prio <= 0:
+		frac = 0.8
+	case prio == 1:
+		frac = 0.9
+	}
+	if float64(s.inFlight.Load()) > frac*float64(max) {
+		e := api.NewError(api.CodeOverloaded, "gateway is saturated; retry shortly")
+		e.RetryAfter = time.Second
+		return e
+	}
+	return nil
 }
 
 // Revoked is set by governance to check fast-path revocations [TEN-02].

@@ -5,6 +5,12 @@ server:
   drain_timeout: 20s
   reload_every: 2s
 
+resilience:
+  breaker:
+    min_requests: 5
+    consecutive_failures: 3
+    cool_down: 3s
+
 storage:
   redis_url: env:REDIS_URL
   postgres_dsn: env:POSTGRES_DSN
@@ -30,9 +36,17 @@ policies:
     objective: max_quality
     description: always the strongest eligible deployment (the savings baseline)
 
+  - name: latency-sensitive
+    objective: min_cost
+    latency_target_ms: 1500
+    description: cheapest deployment expected to answer within 1.5 s
+
 virtual_models:
   - name: baseline
     policy: baseline-strongest
+  - name: latency
+    policy: latency-sensitive
+    deployments: [sima/qwen-4b, simb/qwen-4b]
 
 deployments:
   - id: sima/gemma-e2b
@@ -71,6 +85,17 @@ deployments:
     residency: [local]
     latency: {ttft_ms: 400, tokens_per_sec: 30}
     prices: [{effective_from: 2026-01-01T00:00:00Z, input: 3.00, output: 15.00}]
+  # Backup twin of sima/qwen-4b on the second provider, priced slightly higher so the
+  # primary is preferred while healthy.
+  - id: simb/qwen-4b
+    provider: simb
+    model: qwen-4b
+    tier: 1
+    capabilities: [chat, tools, json_schema]
+    context_window: 16384
+    residency: [local]
+    latency: {ttft_ms: 80, tokens_per_sec: 120}
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.18, output: 0.72}]
   - id: simb/qwen-27b
     provider: simb
     model: qwen-27b

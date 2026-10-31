@@ -114,3 +114,54 @@ Rule-based routing overhead over 1,632 corpus decisions: p50 0.13 ms, p95 2.7 ms
 - Budget degradation (RTE-08), session pinning (RTE-11) and health exclusion are wired as
   hooks and get their tests in M3 and M4. A/B splits and shadow traffic are in M7.
 - Scenario 3 asks for the result to be "shown on the dashboard"; the console ships in M8.
+
+## M3 — Resilience ✅
+
+**Shipped**
+
+- Per-deployment health from live outcomes and active probes (`GET /v1/models` every
+  15 s), with three states: healthy, degraded and unhealthy. A model a reachable provider no
+  longer lists is marked *cold*.
+- Circuit breaker per deployment. It opens on error rate, p95 latency or consecutive
+  failures over a rolling window; after the cool-down it goes half-open and admits exactly
+  one probe; it closes on success and re-opens on failure.
+- Attempt loop: deployments with an open breaker are skipped. A retriable failure
+  (connection, timeout, 429, 5xx, context length, model unloaded/404, provider auth)
+  falls back to the next candidate. Retries of the same deployment use jittered exponential
+  backoff and honour `Retry-After`. The loop stops at the attempt limit and the total
+  deadline. Fallback only ever uses the already-filtered candidate set.
+- Timeouts for connect, TTFT, inter-token idle and total, configurable per deployment and
+  provider. Per-request overrides (`X-Gw-Timeout-Ms`, `X-Gw-Ttft-Timeout-Ms`) are clamped to
+  configured maxima.
+- Concurrency limit per deployment with a bounded queue wait; overflow spills to the next
+  candidate. Pools balance by weighted least in-flight.
+- Latency-aware routing uses the rolling TTFT/TPS from M2. Cold deployments are avoided
+  for latency-sensitive requests while a warm one exists.
+- Session pinning (`X-Gw-Session-Id`) keeps a session on its deployment while that
+  deployment stays healthy and eligible.
+- Load shedding by key priority at gateway saturation (`server.max_in_flight`).
+- Graceful drain: readiness flips to 503, new requests are rejected, and in-flight streams
+  finish up to `drain_timeout`.
+- Simulator: `fail_next` fault, model add/remove control endpoints, one process per
+  instance in scenario runs.
+
+**Requirement IDs covered by tests:** RES-01, RES-02, RES-03, RES-04, RES-05, RES-06,
+RES-07, RES-08, RES-09, RES-10, PRV-09, PRV-10, RTE-07, RTE-11, API-11.
+
+**Exit scenarios** (each run both in-process as Go tests and against real `gateway` and
+`simprovider` processes with the OpenAI SDK, `scenarios/test_s08_s10_resilience.py`):
+
+| Scenario | Result |
+| --- | --- |
+| 8 Provider failover | Pass. After a model is unloaded and then a whole simulator process is killed mid-replay, breakers open and traffic moves, with **0 client errors**. After the model is reloaded and the process restarted, a half-open probe closes the circuit and traffic returns to the cheapest deployment. |
+| 9 Latency-aware routing | Pass. After 3 s is added to the preferred deployment, traffic moves to its twin. It took 6.0 s in the Go test (EWMA α 0.5) and was also well under the 60 s limit in the real-process run (default α 0.2). |
+| 10 Mid-stream failure | Pass. The simulator drops the stream after 50 tokens. The client gets exactly 50 tokens, then an `upstream_unavailable` error event, then `[DONE]`; the OpenAI SDK raises `APIError`. The model is never switched, and the cost record bills ~50 output tokens, flagged estimated, with status 502. |
+
+The scenario suite (10 scenarios so far) passed 3 of 3 consecutive runs.
+
+**Remaining**
+
+- Session pins, breaker state and latency stats are per instance (in-process). M4 moves
+  budgets and limits to Redis. Cross-instance breaker hints and pins are M8 multi-instance
+  work, and DESIGN §5.2 lists the keys.
+- Scenario 8 on LM Studio (unloading a model in the LM Studio UI) needs the Mac.

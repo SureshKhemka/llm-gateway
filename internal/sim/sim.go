@@ -42,6 +42,7 @@ type Faults struct {
 	Down            bool    `json:"down,omitempty"`              // refuse with 503 (connection-level kill uses Instance.Kill)
 	Refuse          bool    `json:"refuse,omitempty"`            // answer with a refusal
 	EmptyAnswer     bool    `json:"empty_answer,omitempty"`
+	FailNext        int     `json:"fail_next,omitempty"` // the next N requests fail with ErrorStatus (429 adds Retry-After)
 }
 
 func (f Faults) merge(o Faults) Faults {
@@ -80,6 +81,7 @@ type Instance struct {
 
 	Requests   atomic.Int64
 	perModel   sync.Map // model -> *atomic.Int64
+	failNext   sync.Map // model -> *atomic.Int64 remaining forced failures
 	TokensSent atomic.Int64
 }
 
@@ -100,12 +102,18 @@ func (in *Instance) SetFaults(model string, f Faults) {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	in.faults[model] = f
+	if f.FailNext > 0 {
+		n := &atomic.Int64{}
+		n.Store(int64(f.FailNext))
+		in.failNext.Store(model, n)
+	}
 }
 
 func (in *Instance) ClearFaults() {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	in.faults = map[string]Faults{}
+	in.failNext.Range(func(k, _ any) bool { in.failNext.Delete(k); return true })
 }
 
 func (in *Instance) AddModel(m Model) {
@@ -286,6 +294,23 @@ func (in *Instance) preflight(w http.ResponseWriter, r *http.Request, model stri
 		w.Header().Set("Retry-After", fmt.Sprint(ra))
 		openAIError(w, 429, "rate limited by simulator")
 		return false
+	}
+	for _, k := range []string{model, ""} {
+		if v, ok := in.failNext.Load(k); ok && v.(*atomic.Int64).Add(-1) >= 0 {
+			st := f.ErrorStatus
+			if st == 0 {
+				st = 500
+			}
+			if st == 429 {
+				ra := f.RetryAfterSec
+				if ra == 0 {
+					ra = 1
+				}
+				w.Header().Set("Retry-After", fmt.Sprint(ra))
+			}
+			openAIError(w, st, "injected failure (fail_next)")
+			return false
+		}
 	}
 	if f.ErrorRate > 0 && in.roll() < f.ErrorRate {
 		st := f.ErrorStatus

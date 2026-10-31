@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SureshKhemka/llm-gateway/internal/config"
 	"github.com/SureshKhemka/llm-gateway/internal/gateway"
@@ -29,6 +31,12 @@ var StandardModels = []sim.Model{
 	{ID: "qwen-27b", Tier: 3, ContextWindow: 131072},
 	{ID: "qwen-vl-8b", Tier: 2, ContextWindow: 32768},
 	{ID: "nomic-embed", Tier: 0, Embeddings: true},
+}
+
+// DeploymentsFor returns StandardDeployments rewritten for another provider ID.
+func DeploymentsFor(provider string) string {
+	body := strings.TrimPrefix(strings.TrimSpace(StandardDeployments), "deployments:")
+	return strings.ReplaceAll(body, "sima", provider)
 }
 
 // StandardDeployments is the deployment section matching StandardModels on provider
@@ -163,10 +171,33 @@ func (e *Env) Close() {
 // SimURL returns the base URL (without /v1) of a sim instance.
 func (e *Env) SimURL(name string) string { return e.simSrv[name].URL }
 
-// KillSim closes a sim's listener so connections are refused.
+// KillSim closes a sim's listener and connections so requests are refused.
 func (e *Env) KillSim(name string) {
 	e.simSrv[name].CloseClientConnections()
 	e.simSrv[name].Listener.Close()
+}
+
+// RestartSim brings a killed sim back on the same address.
+func (e *Env) RestartSim(name string) {
+	e.T.Helper()
+	addr := e.simSrv[name].Listener.Addr().String()
+	var l net.Listener
+	var err error
+	for i := 0; i < 50; i++ {
+		if l, err = net.Listen("tcp", addr); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		e.T.Fatalf("restart %s: %v", name, err)
+	}
+	srv := httptest.NewUnstartedServer(e.Sims[name].Handler())
+	srv.Listener.Close()
+	srv.Listener = l
+	srv.Start()
+	e.simSrv[name] = srv
+	e.cleanup = append(e.cleanup, srv.Close)
 }
 
 // Response is a decoded HTTP response.
