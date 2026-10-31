@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +45,7 @@ type Engine struct {
 	Hooks      RouteHooks
 	Estimators map[string]EstimatorFunc
 	Cache      cache.Store
+	shadows    sync.WaitGroup
 }
 
 type EngineOptions struct {
@@ -343,6 +345,8 @@ func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequ
 	}
 	e.logBody(ctx, s, rc, req, resp)
 	e.finish(s, rc, meta, p, 200, "")
+	e.maybeShadow(rc, req, p.Policy)
+	e.maybeGradeOnline(s, rc, req, resp, meta)
 	return resp, meta, nil
 }
 
@@ -842,6 +846,9 @@ func (cs *ChatStream) Close(clientErr error) *Meta {
 			cs.e.storeCache(context.Background(), cs.s, cs.rc, cs.lookup, asm, m)
 		}
 		cs.e.logBody(context.Background(), cs.s, cs.rc, cs.req, asm)
+		if cs.plan != nil {
+			defer cs.e.maybeShadow(cs.rc, cs.req, cs.plan.Policy)
+		}
 	}
 	status, code := 200, ""
 	switch {

@@ -54,6 +54,8 @@ type RequestContext struct {
 	Explain bool
 	// BodyBytes is the request body size (for caps).
 	BodyBytes int
+	// PolicyOverride routes with this policy (eval runs of candidate versions) [EVL-02].
+	PolicyOverride *config.Policy
 
 	budgets     []governance.BudgetRef
 	reservation *governance.Reservation
@@ -175,3 +177,6 @@ func (rc *RequestContext) admissionHeaders() map[string]string {
 	}
 	return rc.admission.Headers
 }
+
+// anonymous is the principal for the gateway's internal calls.
+var anonymous = &governance.Principal{Anonymous: true, KeyPrefix: "internal"}

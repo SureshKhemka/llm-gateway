@@ -475,6 +475,12 @@ type Evals struct {
 	GateMaxDrop float64 `yaml:"gate_max_drop" json:"gate_max_drop,omitempty"`
 	Judge       string  `yaml:"judge" json:"judge,omitempty"`
 	Embedder    string  `yaml:"embedder" json:"embedder,omitempty"`
+	// GraderWebhook scores items whose grader is "webhook" [EVL-04].
+	GraderWebhook string   `yaml:"grader_webhook" json:"grader_webhook,omitempty"`
+	WebhookAllow  []string `yaml:"webhook_allow" json:"webhook_allow,omitempty"`
+	// OnlineSampleRate is the share of production requests graded asynchronously by the
+	// judge [EVL-09].
+	OnlineSampleRate float64 `yaml:"online_sample_rate" json:"online_sample_rate,omitempty"`
 }
 
 var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}`)

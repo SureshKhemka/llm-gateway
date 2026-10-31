@@ -350,3 +350,25 @@ func (e *Engine) InvalidateCache(ctx context.Context, tenant, policy, model stri
 	}
 	return e.Cache.Invalidate(ctx, ns, cache.Filter{Policy: policy, Model: model, OlderThan: olderThan})
 }
+
+// EmbedForEval embeds texts with a deployment on behalf of the eval runner.
+func (e *Engine) EmbedForEval(ctx context.Context, depID string, texts []string) ([][]float32, error) {
+	s := e.Snapshot()
+	rc := &RequestContext{Start: time.Now(), Principal: anonymous}
+	var out [][]float32
+	for i := 0; i < len(texts); i += 64 {
+		v, _, err := e.embed(ctx, s, rc, depID, texts[i:min(i+64, len(texts))])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v...)
+	}
+	return out, nil
+}
+
+// JudgeForEval scores an answer with a judge deployment (0–1).
+func (e *Engine) JudgeForEval(ctx context.Context, judge, request, response string) (float64, error) {
+	s := e.Snapshot()
+	score, _, err := e.judgeScore(ctx, s, &RequestContext{Start: time.Now(), Principal: anonymous}, judge, request, response)
+	return score, err
+}

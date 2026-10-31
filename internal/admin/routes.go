@@ -44,6 +44,7 @@ func (x *API) routes() {
 	x.add("GET", "/admin/v1/config", "Effective configuration (secret references only)", PermConfigRead, x.getConfig)
 	x.add("POST", "/admin/v1/config/reload", "Re-read configuration files", PermConfigWrite, x.reload)
 	x.add("POST", "/admin/v1/cache/invalidate", "Invalidate cache entries", PermCacheWrite, x.invalidateCache)
+	x.evalRoutes()
 }
 
 func (x *API) whoami(w http.ResponseWriter, _ *http.Request, a *Admin) {

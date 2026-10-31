@@ -389,6 +389,7 @@ func (in *Instance) gatewayRole(req *api.ChatRequest) (string, bool) {
 		return "3", true
 	case strings.Contains(sys, "You are a grader"):
 		reqText, respText, _ := strings.Cut(strings.TrimPrefix(user, "REQUEST:\n"), "\n\nRESPONSE:\n")
+		reqText, _, _ = strings.Cut(reqText, "\n\nRubric:")
 		in.mu.RLock()
 		it, ok := in.oracle[OracleKey(reqText)]
 		in.mu.RUnlock()

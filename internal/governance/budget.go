@@ -106,16 +106,19 @@ func (g *Governor) Applicable(budgets []config.Budget, grants []Grant, sc Scope)
 		b := &budgets[i]
 		var match bool
 		endUser := ""
+		// Eval and shadow traffic is charged only to its own budgets, so its spend stays
+		// separable from production [EVL-11, RTE-13].
+		production := !sc.Shadow && !sc.Eval
 		switch b.Scope {
 		case "tenant":
-			match = b.ScopeID == sc.Tenant && !sc.Shadow
+			match = b.ScopeID == sc.Tenant && production
 		case "project":
-			match = b.ScopeID == sc.Project && !sc.Shadow
+			match = b.ScopeID == sc.Project && production
 		case "key":
-			match = b.ScopeID == sc.Key && !sc.Shadow
+			match = b.ScopeID == sc.Key && production
 		case "end_user":
 			// scope_id names the tenant; every end user of it gets their own counter.
-			match = b.ScopeID == sc.Tenant && sc.EndUser != "" && !sc.Shadow
+			match = b.ScopeID == sc.Tenant && sc.EndUser != "" && production
 			endUser = sc.EndUser
 		case "eval":
 			match = sc.Eval && (b.ScopeID == "" || b.ScopeID == sc.Tenant)

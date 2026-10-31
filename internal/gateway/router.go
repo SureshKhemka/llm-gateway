@@ -33,6 +33,9 @@ type RouteHooks struct {
 // global default. Other virtual models (auto-fast, auto-cheap, operator-defined) carry
 // their own policy; scope-level hard limits still apply to them as constraints.
 func resolvePolicy(s *Snapshot, rc *RequestContext, vm *catalog.VirtualModel) (*config.Policy, string) {
+	if rc.PolicyOverride != nil {
+		return rc.PolicyOverride, "eval_override"
+	}
 	type cand struct{ name, src string }
 	var order []cand
 	generic := vm == nil || vm.Name == "auto" || vm.Policy == ""
@@ -188,10 +191,11 @@ type ranked struct {
 func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm *catalog.VirtualModel, p *Plan) error {
 	t0 := time.Now()
 	pol, src := resolvePolicy(s, rc, vm)
+	pol, variant := splitPolicy(s, rc, pol)
 	p.Policy, p.PolicyName, p.PolicyVersion = pol, pol.Name, pol.Version
 	dec := &Decision{RequestID: rc.ID, RequestedModel: req.Model, Policy: pol.Name, PolicyVersion: pol.Version,
 		PolicySource: src, Objective: pol.Objective, PromptTokens: p.PromptTokens, MaxOutputTokens: p.MaxOutput,
-		Cascade: pol.Cascade.Enabled && (!req.Stream || pol.Cascade.BufferStreams)}
+		Cascade: pol.Cascade.Enabled && (!req.Stream || pol.Cascade.BufferStreams), SplitVariant: variant}
 	p.Decision = dec
 
 	c := buildConstraints(s, rc, req, pol, e.residencyFor(s, rc))

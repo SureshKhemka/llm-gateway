@@ -9,6 +9,7 @@ import (
 
 	"github.com/SureshKhemka/llm-gateway/internal/api"
 	"github.com/SureshKhemka/llm-gateway/internal/gateway"
+	"github.com/SureshKhemka/llm-gateway/internal/store"
 )
 
 // prepareChat authenticates and parses an OpenAI chat request.
@@ -233,4 +234,34 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(rec.Body)
+}
+
+// handleFeedback records a client's quality signal for one of its requests [EVL-09].
+func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
+	p, aerr := s.Authenticate(r, "chat")
+	if aerr != nil {
+		api.WriteError(w, api.FormatOpenAI, aerr)
+		return
+	}
+	var fb struct {
+		RequestID string  `json:"request_id"`
+		Score     float64 `json:"score"`
+		Comment   string  `json:"comment"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&fb); err != nil || fb.Score < 0 || fb.Score > 1 {
+		api.WriteError(w, api.FormatOpenAI, api.NewError(api.CodeInvalidRequest, "body must be {request_id, score in [0,1], comment}"))
+		return
+	}
+	s.Engine.Writer.Flush()
+	dec, err := s.Engine.Store.GetDecision(r.Context(), fb.RequestID)
+	if err != nil || dec.Tenant != p.TenantID() {
+		api.WriteError(w, api.FormatOpenAI, api.NewError(api.CodeNotFound, "unknown request"))
+		return
+	}
+	var d gateway.Decision
+	_ = json.Unmarshal(dec.Body, &d)
+	b, _ := json.Marshal(map[string]any{"request_id": fb.RequestID, "deployment": d.Chosen, "policy": d.Policy, "score": fb.Score,
+		"comment": fb.Comment, "source": "feedback", "key": p.KeyID})
+	_ = s.Engine.Store.PutDoc(r.Context(), store.Doc{Kind: "quality_signal", ID: "fb:" + fb.RequestID, Tenant: p.TenantID(), Body: b})
+	writeJSON(w, http.StatusAccepted, map[string]any{"recorded": true})
 }

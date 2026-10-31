@@ -13,6 +13,14 @@ cache:
   embedder: sima/nomic-embed
   price_usd: 0
 
+evals:
+  judge: sima/qwen-27b
+  embedder: sima/nomic-embed
+  gate_max_drop: 2
+
+budgets:
+  - {id: team-a-evals, scope: eval, scope_id: team-a, period: monthly, hard_usd: 25}
+
 resilience:
   breaker:
     min_requests: 5

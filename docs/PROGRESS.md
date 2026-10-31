@@ -350,3 +350,66 @@ Claude Code sends `max_tokens: 32000` with a ~21–31k-token prompt. The router 
 client's max_tokens as a hard requirement and excluded every deployment, so the request
 failed with `no_eligible_model`. Fix: max_tokens is clamped per attempt to the
 deployment's limit and is no longer a reason to exclude it.
+
+## M7 — Evals and tuning ✅
+
+**Shipped**
+
+- **Eval suites:** prompts or messages with reference answers, rubrics, category, labelled
+  difficulty and grader, imported as JSON or JSONL with per-line validation. The 544-prompt
+  corpus is itself a valid suite.
+- **Runs** (`POST /admin/v1/evals/runs`, synchronous or asynchronous): any set of
+  deployments (or `all_deployments`) and policy versions, including inactive candidate
+  versions routed through the real engine. Each item records score, cost, latency, served
+  model and tier, difficulty score and estimated tier. Eval traffic carries the run ID, is
+  tagged, bypasses the cache, and is charged **only** to `eval`-scope budgets.
+- **Graders:** exact, contains, regex, JSON-schema validity, tool call, non-empty,
+  embedding similarity, LLM-as-judge (configurable judge model and rubric), and custom
+  webhook graders.
+- **Reports:**
+  - Per target: quality with 95% bootstrap CI, cost, p50/p95 latency and per-category
+    breakdown.
+  - A paired-bootstrap delta against a baseline target, with CI and cost change.
+  - The quality-versus-cost Pareto frontier, as JSON and an SVG chart.
+  - A difficulty-estimator confusion matrix and its accuracy.
+- **Recommendations:** a grid search over difficulty thresholds minimises predicted cost
+  at a target quality (default: baseline − gate drop). A semantic-cache threshold is
+  recommended from paraphrase pairs versus look-alike pairs.
+- **Policy versions:** new versions are created inactive, with field-level diffs.
+  Activation goes through a **promotion gate**: the candidate's eval quality must be within
+  `evals.gate_max_drop` of the active version's. Only an org admin can override, with a
+  reason, and the override is audited. **Rollback** to any retained version is one call.
+- **A/B splits** between policies, sticky by end user, then session.
+- **Shadow traffic:** a sampled share is mirrored to a policy or deployment. It is
+  recorded with cost and decision, charged to `shadow` budgets, excluded from default
+  reports, and never returned to the client.
+- **Online quality:** `POST /v1/feedback` for client scores, plus asynchronous judge
+  grading of a sampled share of production traffic. `GET /admin/v1/quality` reports
+  quality by deployment or policy.
+- **Replay** of a captured window (tenants with body logging) against a candidate policy,
+  with cost change and quality versus the original answers.
+
+**Requirement IDs covered by tests:** EVL-01 … EVL-11, RTE-12, RTE-13, CFG-05 (policy
+diff), CFG-06.
+
+**Exit scenario 13**: pass, both in-process and against real processes
+(`scenarios/test_s13_evals.py`). The real-process run went:
+
+1. Eval of all 8 chat deployments plus `default@1` and `baseline-strongest@1` produced a
+   Pareto chart.
+2. The recommendation (thresholds `[0.05, 0.80, 0.85]`) became `default@2`. Its eval scored
+   **98.1 versus 100.0** for v1, within the 2-point gate, so it was activated.
+3. A deliberately worse `default@3` scored **86.0** and its activation was **blocked
+   (409)**.
+4. Rollback to `default@1` took one call.
+
+In the in-process run the recommendation halved predicted cost ($0.0093 versus $0.0197)
+at equal predicted quality, and v2 measured $0.0095 versus $0.0200.
+
+**Caveats**
+
+- In these runs recommendations are fitted and evaluated on the same suite, which
+  overstates the gain. For production, fit on one window or suite and gate on a held-out
+  one. The API supports this, because the gate uses whatever run the caller names.
+- All quality numbers come from the simulator's tier model. Real numbers need the LM
+  Studio lineup and a real judge model.
