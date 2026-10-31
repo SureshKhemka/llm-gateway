@@ -58,6 +58,34 @@ nothing is silently lost. The Anthropic endpoint translates in and out at the ed
 Anthropic-format upstream is reached by translating the canonical request back. Streams
 are canonical `ChatChunk`s; the edge encoder writes OpenAI SSE or Anthropic event SSE.
 
+### 3.1 Anthropic format (as implemented) [API-02, API-06]
+
+`/v1/messages` (plus `count_tokens`) parses the Anthropic body, keeps it on the canonical
+request (`ChatRequest.Anthropic`) and translates it to canonical form for routing.
+
+- **Same-format pass-through.** An Anthropic-format upstream receives the original body
+  with only `model` (and a clamped `max_tokens`) changed: cache_control, thinking,
+  citations, server tools and unknown fields survive. Non-streaming responses are forwarded
+  verbatim (model rewritten). Stream events are carried on canonical chunks (`Raw`) and
+  replayed verbatim to Anthropic clients, while the gateway meters them through the
+  canonical view.
+- **Cross-format translation** covers system prompts (string or blocks), multi-turn
+  messages, images (base64 and URL), tool definitions, tool_use/tool_result in both
+  directions (results become `tool` messages and back), tool_choice and
+  parallel_tool_calls, stop sequences, sampling, JSON-schema output ↔
+  `output_config.format`, reasoning effort, stop reasons, usage (cache reads reported as
+  cached prompt tokens) and streaming events.
+- **What cannot cross:** server tools, non-text documents and other block types are
+  rejected with a 400 that says they need an Anthropic-format deployment. Thinking text
+  crosses as `reasoning_content`, but signatures do not.
+- The upstream adapter is raw HTTP rather than the Anthropic SDK, because a protocol
+  gateway needs wire-level fidelity: verbatim pass-through, its own TTFT/idle watchdog,
+  and event replay. It sends `anthropic-version: 2023-06-01` unless provider headers
+  override it.
+- `model_aliases` (globs such as `claude-* → auto`) let Anthropic clients keep their model
+  names. A client `max_tokens` above a deployment's limit is clamped per attempt, never an
+  exclusion. Claude Code sends 32,000; excluding on it left no candidates.
+
 ## 4. Configuration [CFG-01..07]
 
 Files (`gateway.yaml`, optionally a directory of `*.yaml` merged in lexical order):

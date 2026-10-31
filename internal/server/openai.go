@@ -23,6 +23,7 @@ func (s *Server) prepareChat(w http.ResponseWriter, r *http.Request, endpoint st
 	if aerr != nil {
 		return rc, nil, aerr
 	}
+	rc.BodyBytes = len(body)
 	var req api.ChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return rc, nil, api.NewError(api.CodeInvalidRequest, "invalid JSON body: %v", err)
@@ -187,6 +188,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rc.Principal = p
+	if r.Header.Get("Anthropic-Version") != "" {
+		writeJSON(w, http.StatusOK, anthropicModels(s.Engine.Models(rc)))
+		return
+	}
 	writeJSON(w, http.StatusOK, s.Engine.Models(rc))
 }
 

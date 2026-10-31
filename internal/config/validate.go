@@ -367,6 +367,17 @@ func (v *validator) run() {
 		}
 	}
 
+	v.secret("storage", "", "storage.body_key", c.Storage.BodyKey)
+	for _, t := range c.Tenants {
+		if t.BodyLogging.Enabled && c.Storage.BodyKey.IsZero() {
+			v.add("tenants", t.ID, "tenants["+t.ID+"].body_logging", "body logging needs storage.body_key so stored bodies are encrypted")
+		}
+	}
+	for i, a := range c.ModelAliases {
+		if _, isDep := deps[a.Model]; !isDep && !vms[a.Model] && a.Model != "auto" && a.Model != "auto-fast" && a.Model != "auto-cheap" {
+			v.add("model_aliases", "", fmt.Sprintf("model_aliases[%d].model", i), "unknown model %q", a.Model)
+		}
+	}
 	if !knownPII[c.Guardrails.PII] {
 		v.add("guardrails", "", "guardrails.pii", "must be off, log, redact or block")
 	}

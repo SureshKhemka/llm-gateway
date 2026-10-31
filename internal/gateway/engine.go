@@ -163,6 +163,8 @@ type Plan struct {
 	Decision      *Decision
 	PromptTokens  int
 	MaxOutput     int
+	// Redacted is sent to non-local deployments when PII redaction applies [GRD-04].
+	Redacted *api.ChatRequest
 }
 
 // plan resolves the requested model: virtual models go through the router; concrete
@@ -298,6 +300,10 @@ func (e *Engine) policyFor(s *Snapshot, rc *RequestContext, model string) *confi
 func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequest) (*api.ChatResponse, *Meta, error) {
 	s := e.Snapshot()
 	meta := e.newMeta(rc, req.Model)
+	req.Model = resolveAlias(s, req.Model)
+	if gerr := e.guardRequest(ctx, s, rc, req); gerr != nil {
+		return nil, e.failPlan(s, rc, meta, nil, gerr), gerr
+	}
 	if aerr := e.admit(ctx, s, rc, req, tokens.Prompt(req)); aerr != nil {
 		return nil, e.failPlan(s, rc, meta, nil, aerr), aerr
 	}
@@ -317,14 +323,25 @@ func (e *Engine) Chat(ctx context.Context, rc *RequestContext, req *api.ChatRequ
 		return nil, e.failPlan(s, rc, meta, p, err), err
 	}
 	applyPlan(meta, p)
+	if perr := e.applyPII(s, rc, req, p, meta); perr != nil {
+		return nil, e.failPlan(s, rc, meta, p, perr), perr
+	}
 	resp, valid, err := e.runChat(ctx, s, rc, req, p, meta)
 	if err != nil {
 		gerr := upstreamToAPI(err)
 		return nil, e.failPlan(s, rc, meta, p, gerr), gerr
 	}
+	if post := s.Config.Guardrails.PostWebhook; post != "" {
+		text, _ := responseText(resp)
+		if werr := e.callWebhook(ctx, s, post, map[string]any{"stage": "post", "request_id": rc.ID, "tenant": rc.Principal.TenantID(),
+			"model": meta.Deployment, "response": text}); werr != nil {
+			return nil, e.failPlan(s, rc, meta, p, werr), werr
+		}
+	}
 	if valid {
 		e.storeCache(ctx, s, rc, lk, resp, meta)
 	}
+	e.logBody(ctx, s, rc, req, resp)
 	e.finish(s, rc, meta, p, 200, "")
 	return resp, meta, nil
 }
@@ -342,7 +359,7 @@ func (e *Engine) runChat(ctx context.Context, s *Snapshot, rc *RequestContext, r
 		sub.Attempts = attempts
 		h, err := e.execute(ctx, s, rc, &sub, meta, func(ctx context.Context, d *catalog.Deployment) error {
 			var err error
-			resp, err = s.Providers.Get(d.Provider).Chat(ctx, d, req, e.timeouts(s, rc, d))
+			resp, err = s.Providers.Get(d.Provider).Chat(ctx, d, requestFor(p, d, req), e.timeouts(s, rc, d))
 			return err
 		})
 		if err != nil {
@@ -600,7 +617,7 @@ func isContent(ch *api.ChatChunk) bool {
 
 // open starts the upstream stream on d and buffers chunks up to the first content.
 func (cs *ChatStream) open(ctx context.Context, d *catalog.Deployment) error {
-	up, err := cs.s.Providers.Get(d.Provider).ChatStream(ctx, d, cs.req, cs.e.timeouts(cs.s, cs.rc, d))
+	up, err := cs.s.Providers.Get(d.Provider).ChatStream(ctx, d, requestFor(cs.plan, d, cs.req), cs.e.timeouts(cs.s, cs.rc, d))
 	if err != nil {
 		return err
 	}
@@ -667,6 +684,11 @@ func (cs *ChatStream) absorb(ch *api.ChatChunk) bool {
 func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.ChatRequest) (*ChatStream, error) {
 	s := e.Snapshot()
 	meta := e.newMeta(rc, req.Model)
+	req.Model = resolveAlias(s, req.Model)
+	if gerr := e.guardRequest(ctx, s, rc, req); gerr != nil {
+		e.failPlan(s, rc, meta, nil, gerr)
+		return &ChatStream{Meta: meta}, gerr
+	}
 	if aerr := e.admit(ctx, s, rc, req, tokens.Prompt(req)); aerr != nil {
 		e.failPlan(s, rc, meta, nil, aerr)
 		return &ChatStream{Meta: meta}, aerr
@@ -689,6 +711,10 @@ func (e *Engine) ChatStream(ctx context.Context, rc *RequestContext, req *api.Ch
 	}
 	applyPlan(meta, p)
 	cs.plan = p
+	if perr := e.applyPII(s, rc, req, p, meta); perr != nil {
+		e.failPlan(s, rc, meta, p, perr)
+		return &ChatStream{Meta: meta}, perr
+	}
 	if p.Decision != nil && p.Decision.Cascade {
 		// Buffered cascade: produce and validate the whole answer, then stream it.
 		resp, valid, err := e.runChat(ctx, s, rc, req, p, meta)
@@ -810,8 +836,12 @@ func (cs *ChatStream) Close(clientErr error) *Meta {
 	}
 	last := &m.Attempts[len(m.Attempts)-1]
 	last.CostUSD, last.LatencyMs, last.TTFTMs = m.Cost.Total(), m.UpstreamMs, m.TTFTMs
-	if clientErr == nil && cs.FailErr == nil && cs.finish != "length" {
-		cs.e.storeCache(context.Background(), cs.s, cs.rc, cs.lookup, cs.assembled(), m)
+	if clientErr == nil && cs.FailErr == nil {
+		asm := cs.assembled()
+		if cs.finish != "length" {
+			cs.e.storeCache(context.Background(), cs.s, cs.rc, cs.lookup, asm, m)
+		}
+		cs.e.logBody(context.Background(), cs.s, cs.rc, cs.req, asm)
 	}
 	status, code := 200, ""
 	switch {

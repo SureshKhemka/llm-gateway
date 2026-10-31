@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SureshKhemka/llm-gateway/internal/config"
 	"github.com/SureshKhemka/llm-gateway/internal/store"
 )
 
@@ -21,3 +22,5 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not met within 3s")
 }
+
+func testenvParse(yaml string) (any, error) { return config.Parse("t.yaml", []byte(yaml)) }

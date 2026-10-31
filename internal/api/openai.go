@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"strings"
+	"sync"
 )
 
 // Content is a message's content: either a plain string or a list of parts.
@@ -196,6 +197,9 @@ type ChatRequest struct {
 	// Extra holds fields the gateway does not model; they are forwarded verbatim to
 	// OpenAI-format upstreams.
 	Extra map[string]json.RawMessage `json:"-"`
+	// Anthropic is the original body when the client spoke the Anthropic format, so an
+	// Anthropic-format upstream receives it without translation loss [API-06].
+	Anthropic *AnthropicRequest `json:"-"`
 }
 
 func (r ChatRequest) MarshalJSON() ([]byte, error) {
@@ -220,6 +224,7 @@ func (r *ChatRequest) Clone() *ChatRequest {
 	b, _ := json.Marshal(r)
 	var out ChatRequest
 	_ = json.Unmarshal(b, &out)
+	out.Anthropic = r.Anthropic
 	return &out
 }
 
@@ -285,6 +290,8 @@ type ChatResponse struct {
 	Choices           []Choice `json:"choices"`
 	Usage             *Usage   `json:"usage,omitempty"`
 	SystemFingerprint string   `json:"system_fingerprint,omitempty"`
+	// RawAnthropic is the upstream body when an Anthropic-format provider produced it.
+	RawAnthropic json.RawMessage `json:"-"`
 }
 
 type Choice struct {
@@ -303,6 +310,15 @@ type ChatChunk struct {
 	Usage   *Usage        `json:"usage,omitempty"`
 	// Gateway carries per-request metadata on the final chunk of a gateway stream.
 	Gateway map[string]any `json:"x_gateway,omitempty"`
+	// Raw holds the Anthropic-format upstream events this chunk came from, replayed
+	// verbatim to Anthropic-format clients.
+	Raw []RawEvent `json:"-"`
+}
+
+// RawEvent is one upstream SSE event.
+type RawEvent struct {
+	Event string
+	Data  json.RawMessage
 }
 
 type ChunkChoice struct {
@@ -367,11 +383,16 @@ type ModelObject struct {
 
 // ---- helpers for preserving unknown JSON fields ----
 
-var knownFieldsCache = map[reflect.Type]map[string]bool{}
+var knownFieldsCache sync.Map // reflect.Type -> map[string]bool
+
+func knownFieldsFor[T any]() map[string]bool {
+	var zero T
+	return knownFields(reflect.TypeOf(zero))
+}
 
 func knownFields(t reflect.Type) map[string]bool {
-	if m, ok := knownFieldsCache[t]; ok {
-		return m
+	if m, ok := knownFieldsCache.Load(t); ok {
+		return m.(map[string]bool)
 	}
 	m := map[string]bool{}
 	for i := 0; i < t.NumField(); i++ {
@@ -381,7 +402,7 @@ func knownFields(t reflect.Type) map[string]bool {
 			m[name] = true
 		}
 	}
-	knownFieldsCache[t] = m
+	knownFieldsCache.Store(t, m)
 	return m
 }
 

@@ -269,9 +269,8 @@ func (e *Engine) route(s *Snapshot, rc *RequestContext, req *api.ChatRequest, vm
 		if p.PromptTokens+outTokens > d.ContextWindow {
 			reasons = append(reasons, fmt.Sprintf("context_window:%d<%d", d.ContextWindow, p.PromptTokens+outTokens))
 		}
-		if explicitMax > 0 && explicitMax > d.MaxOutputTokens {
-			reasons = append(reasons, fmt.Sprintf("max_output_tokens:%d<%d", d.MaxOutputTokens, explicitMax))
-		}
+		// A client max_tokens above the deployment's limit is an upper bound, not a
+		// requirement: it is clamped per attempt (requestFor) rather than excluding.
 		if !rc.Principal.ModelAllowed(d.ID) {
 			reasons = append(reasons, "not_allowed_for_key")
 		}

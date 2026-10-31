@@ -52,6 +52,8 @@ type RequestContext struct {
 	Shadow    bool
 	// Explain asks the engine to plan only (route-explain) [RTE-15].
 	Explain bool
+	// BodyBytes is the request body size (for caps).
+	BodyBytes int
 
 	budgets     []governance.BudgetRef
 	reservation *governance.Reservation

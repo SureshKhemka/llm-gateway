@@ -109,6 +109,7 @@ type Config struct {
 	Resilience    Resilience      `yaml:"resilience" json:"resilience,omitempty"`
 	Observability Observability   `yaml:"observability" json:"observability,omitempty"`
 	Defaults      RoutingDefaults `yaml:"defaults" json:"defaults,omitempty"`
+	ModelAliases  []ModelAlias    `yaml:"model_aliases" json:"model_aliases,omitempty"`
 	Evals         Evals           `yaml:"evals" json:"evals,omitempty"`
 
 	// Files lists the files this config was loaded from (for messages).
@@ -153,8 +154,10 @@ type Storage struct {
 	RedisURL    SecretRef `yaml:"redis_url" json:"redis_url,omitempty"`
 	PostgresDSN SecretRef `yaml:"postgres_dsn" json:"postgres_dsn,omitempty"`
 	// BudgetsFailOpen lets requests through when Redis is unreachable (default: fail closed) [NFR-08].
-	BudgetsFailOpen bool   `yaml:"budgets_fail_open" json:"budgets_fail_open,omitempty"`
-	WALDir          string `yaml:"wal_dir" json:"wal_dir,omitempty"`
+	BudgetsFailOpen bool `yaml:"budgets_fail_open" json:"budgets_fail_open,omitempty"`
+	// BodyKey encrypts stored request/response bodies (required for body logging) [NFR-12].
+	BodyKey SecretRef `yaml:"body_key" json:"body_key,omitempty"`
+	WALDir  string    `yaml:"wal_dir" json:"wal_dir,omitempty"`
 }
 
 type Provider struct {
@@ -222,6 +225,13 @@ type VirtualModel struct {
 	Policy      string   `yaml:"policy" json:"policy,omitempty"`
 	Deployments []string `yaml:"deployments" json:"deployments,omitempty"` // empty: every chat deployment
 	Description string   `yaml:"description" json:"description,omitempty"`
+}
+
+// ModelAlias maps requested model names (glob) to a virtual or concrete model, e.g.
+// "claude-*" → "auto" so Anthropic clients work unchanged.
+type ModelAlias struct {
+	Match string `yaml:"match" json:"match"`
+	Model string `yaml:"model" json:"model"`
 }
 
 type DifficultyCfg struct {
@@ -413,6 +423,7 @@ type Guardrails struct {
 	PreWebhook     string              `yaml:"pre_webhook" json:"pre_webhook,omitempty"`
 	PostWebhook    string              `yaml:"post_webhook" json:"post_webhook,omitempty"`
 	WebhookTimeout Duration            `yaml:"webhook_timeout" json:"webhook_timeout,omitempty"`
+	WebhookAllow   []string            `yaml:"webhook_allow" json:"webhook_allow,omitempty"` // private hosts/CIDRs webhooks may reach
 	FailOpen       bool                `yaml:"fail_open" json:"fail_open,omitempty"`
 }
 

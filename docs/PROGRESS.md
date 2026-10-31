@@ -298,3 +298,55 @@ and latency), CST-01 (overhead).
   same replay served wrong answers on 112 of 284 semantic hits at threshold 0.85.
 - The k-NN estimator scored 97.5% tier accuracy on held-out corpus prompts, using the
   simulator embeddings.
+
+## M6 — Formats and data control ✅
+
+**Shipped**
+
+- **Anthropic-compatible endpoints:** `POST /v1/messages` (non-streaming and streaming,
+  tools, system prompts as string or blocks, images, multi-turn, stop sequences) and
+  `POST /v1/messages/count_tokens`. Errors use Anthropic's shape (with the gateway code),
+  and `/v1/models` answers in Anthropic's shape when `anthropic-version` is sent.
+- **Translation in both directions between the OpenAI and Anthropic formats:** requests,
+  responses, tool calls, tool results, stop reasons, usage and streaming events.
+  Anthropic-to-Anthropic traffic passes through losslessly (raw body and raw events).
+- **Anthropic-format upstream adapter** for the Anthropic API or LM Studio's
+  Anthropic-compatible endpoint. The simulator now also serves `/v1/messages`, with the
+  same faults.
+- **`model_aliases`** (`claude-* → auto`), so Claude Code and the Anthropic SDKs need only
+  a base URL and a key.
+- **Data residency:** sensitivity labels (`X-Gw-Sensitivity` or `metadata.gateway`) map to
+  allowed residency tags. Unknown labels are rejected, and residency is a hard constraint
+  that fallback never relaxes.
+- **PII and secret detection:** email, phone, card numbers (Luhn-checked), Aadhaar
+  (Verhoeff-checked), PAN and API keys. There is a mode per tenant:
+  - `log` records the types only, never the values.
+  - `redact` sends a redacted copy to non-local deployments while local ones get the
+    original.
+  - `block` drops non-local deployments, or returns 403 `policy_blocked` if nothing local
+    remains.
+- **Caps:** request bytes and message count per key, tenant and globally (rejected), and
+  max output tokens (clamped).
+- **Opt-in body logging:** off by default. Bodies are redacted, then AES-256-GCM encrypted
+  with `storage.body_key`, and kept for a retention period with purge. Enabling body logging
+  without a key is a configuration error.
+- **Pre/post-request webhooks** with a timeout, fail-open/closed behaviour and the SSRF
+  guard.
+
+**Requirement IDs covered by tests:** API-02, API-06, API-07, API-10, GRD-01, GRD-02,
+GRD-03, GRD-04, GRD-05, NFR-12, NFR-20 (Anthropic Python SDK, Claude Code).
+
+**Exit scenarios**
+
+| Scenario | Result |
+| --- | --- |
+| 1 Drop-in (Anthropic part) | Pass. The official `anthropic` Python SDK (2.3.0) runs against the real binaries: messages with system blocks, streaming, tool use plus the tool_result round trip, streaming tool use, images, and error mapping. It works over an OpenAI-format upstream (translated) and an Anthropic-format upstream (pass-through). The full scenario suite (21 tests) passed. |
+| 11 Data residency and PII | Pass. With a cheaper external "cloud" deployment configured, a `confidential` request has only local candidates, and the cloud one is excluded for `residency`. A prompt with an email and a PAN logs `pii_detected: [email, pan]` in log-only mode, and the values never appear in the log. Redact and block modes are covered by separate tests. |
+| 17 Claude Code through the gateway | Pass with the **real Claude Code CLI (2.1.42)** in this container. It ran headless (`claude -p`) with `ANTHROPIC_BASE_URL` set to the gateway, its key, and `ANTHROPIC_CUSTOM_HEADERS: X-Gw-Sensitivity: confidential`. The session made a tool call and then answered, both on local `sima/qwen-27b` (~20.6k prompt tokens each), with spend attributed to its key. Note: the answers came from the simulator. A real coding session on LM Studio models still needs to be run on the Mac. |
+
+**Bugs found by running Claude Code**
+
+Claude Code sends `max_tokens: 32000` with a ~21–31k-token prompt. The router treated the
+client's max_tokens as a hard requirement and excluded every deployment, so the request
+failed with `no_eligible_model`. Fix: max_tokens is clamped per attempt to the
+deployment's limit and is no longer a reason to exclude it.

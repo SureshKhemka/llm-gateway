@@ -31,6 +31,24 @@ providers:
   - id: simb
     type: openai
     base_url: ${SIMB_URL:-http://localhost:9002/v1}
+  # The same simulator instance spoken to in Anthropic format (as LM Studio's
+  # Anthropic-compatible endpoint would be).
+  - id: simb-anth
+    type: anthropic
+    base_url: ${SIMB_URL:-http://localhost:9002/v1}
+  # Stands in for a cloud provider: same simulator, but tagged external.
+  - id: cloud
+    type: openai
+    base_url: ${SIMB_URL:-http://localhost:9002/v1}
+
+# Anthropic clients (Claude Code, the Anthropic SDKs) can keep their model names.
+model_aliases:
+  - {match: "claude-*", model: auto}
+
+guardrails:
+  pii: log
+  sensitivity:
+    confidential: [local]
 
 defaults:
   policy: default
@@ -122,6 +140,22 @@ deployments:
     residency: [local]
     latency: {ttft_ms: 150, tokens_per_sec: 70}
     prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.50, output: 2.00}]
+  - id: simb-anth/claude-local
+    provider: simb-anth
+    model: qwen-9b
+    tier: 2
+    capabilities: [chat, tools, json_schema, vision]
+    context_window: 32768
+    residency: [local]
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.50, output: 2.00}]
+  - id: cloud/frontier
+    provider: cloud
+    model: qwen-27b
+    tier: 3
+    capabilities: [chat, tools, json_schema, reasoning]
+    context_window: 131072
+    residency: [external]
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 2.50, output: 12.00}]
   - id: sima/qwen-vl-8b
     provider: sima
     model: qwen-vl-8b
