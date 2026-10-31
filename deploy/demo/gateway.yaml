@@ -1,0 +1,112 @@
+# Demo configuration: two simulated provider instances (sima, simb) plus optional LM
+# Studio. Used by `make demo-up` and by the scenario scripts in scenarios/.
+server:
+  listen: ${GATEWAY_LISTEN:-:8080}
+  drain_timeout: 20s
+  reload_every: 2s
+
+storage:
+  redis_url: env:REDIS_URL
+  postgres_dsn: env:POSTGRES_DSN
+  wal_dir: ${WAL_DIR:-/tmp/gateway-wal}
+
+providers:
+  - id: sima
+    type: openai
+    base_url: ${SIMA_URL:-http://localhost:9001/v1}
+  - id: simb
+    type: openai
+    base_url: ${SIMB_URL:-http://localhost:9002/v1}
+
+defaults:
+  policy: default
+  baseline: sima/qwen-27b
+
+deployments:
+  - id: sima/gemma-e2b
+    provider: sima
+    model: gemma-e2b
+    tier: 0
+    capabilities: [chat]
+    context_window: 8192
+    residency: [local]
+    latency: {ttft_ms: 50, tokens_per_sec: 200}
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.05, output: 0.20}]
+  - id: sima/qwen-4b
+    provider: sima
+    model: qwen-4b
+    tier: 1
+    capabilities: [chat, tools, json_schema]
+    context_window: 16384
+    residency: [local]
+    latency: {ttft_ms: 80, tokens_per_sec: 120}
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.15, output: 0.60}]
+  - id: sima/qwen-9b
+    provider: sima
+    model: qwen-9b
+    tier: 2
+    capabilities: [chat, tools, json_schema, reasoning]
+    context_window: 32768
+    residency: [local]
+    latency: {ttft_ms: 150, tokens_per_sec: 70}
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.50, output: 2.00}]
+  - id: sima/qwen-27b
+    provider: sima
+    model: qwen-27b
+    tier: 3
+    capabilities: [chat, tools, json_schema, reasoning]
+    context_window: 131072
+    residency: [local]
+    latency: {ttft_ms: 400, tokens_per_sec: 30}
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 3.00, output: 15.00}]
+  - id: simb/qwen-27b
+    provider: simb
+    model: qwen-27b
+    tier: 3
+    capabilities: [chat, tools, json_schema, reasoning]
+    context_window: 131072
+    residency: [local]
+    latency: {ttft_ms: 400, tokens_per_sec: 30}
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 3.00, output: 15.00}]
+  - id: simb/qwen-9b
+    provider: simb
+    model: qwen-9b
+    tier: 2
+    capabilities: [chat, tools, json_schema, reasoning]
+    context_window: 32768
+    residency: [local]
+    latency: {ttft_ms: 150, tokens_per_sec: 70}
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.50, output: 2.00}]
+  - id: sima/qwen-vl-8b
+    provider: sima
+    model: qwen-vl-8b
+    tier: 2
+    capabilities: [chat, vision]
+    context_window: 32768
+    residency: [local]
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.50, output: 2.00}]
+  - id: sima/nomic-embed
+    provider: sima
+    model: nomic-embed
+    tier: 0
+    capabilities: [embeddings]
+    residency: [local]
+    prices: [{effective_from: 2026-01-01T00:00:00Z, input: 0.02, output: 0}]
+
+tenants:
+  - id: team-a
+    name: Team A
+    projects:
+      - id: team-a-app
+        keys:
+          - id: demo-key-a
+            name: demo key A
+            secret: env:DEMO_KEY_A
+  - id: team-b
+    name: Team B
+    projects:
+      - id: team-b-app
+        keys:
+          - id: demo-key-b
+            name: demo key B
+            secret: env:DEMO_KEY_B
